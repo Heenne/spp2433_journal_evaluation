@@ -1,0 +1,19 @@
+[workspace]
+name = "spp2433_journal_evaluation"
+version = "0.1.0"
+description = "3D Point Cloud Data Viewer"
+authors = ["Author <author@example.com>"]
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
+
+[tasks]
+start = "python -m src.main"
+
+[dependencies]
+python = ">=3.10"
+
+[pypi-dependencies]
+PyQt6 = ">=6.4.0"
+pandas = ">=2.0.0"
+matplotlib = ">=3.7.0"
+numpy = ">=1.24.0"
