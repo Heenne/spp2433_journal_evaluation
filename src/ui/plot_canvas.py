@@ -15,6 +15,37 @@ class PlotCanvas(FigureCanvas):
         
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.updateGeometry()
+        self.mpl_connect('scroll_event', self._on_scroll)
+        
+    def _on_scroll(self, event):
+        if event.inaxes != self.axes:
+            return
+            
+        base_scale = 1.1
+        if event.button == 'up':
+            scale_factor = 1 / base_scale
+        elif event.button == 'down':
+            scale_factor = base_scale
+        else:
+            return
+            
+        cur_xlim = self.axes.get_xlim3d()
+        cur_ylim = self.axes.get_ylim3d()
+        cur_zlim = self.axes.get_zlim3d()
+
+        xdata = event.xdata if event.xdata is not None else sum(cur_xlim)/2
+        ydata = event.ydata if event.ydata is not None else sum(cur_ylim)/2
+        zcenter = sum(cur_zlim)/2
+
+        new_xlim = [xdata - (xdata - cur_xlim[0]) * scale_factor, xdata + (cur_xlim[1] - xdata) * scale_factor]
+        new_ylim = [ydata - (ydata - cur_ylim[0]) * scale_factor, ydata + (cur_ylim[1] - ydata) * scale_factor]
+        new_zlim = [zcenter - (zcenter - cur_zlim[0]) * scale_factor, zcenter + (cur_zlim[1] - zcenter) * scale_factor]
+
+        self.axes.set_xlim3d(new_xlim)
+        self.axes.set_ylim3d(new_ylim)
+        self.axes.set_zlim3d(new_zlim)
+        self.draw_idle()
+
         
     def plot_datasets(self, datasets: list):
         self.axes.cla() # Clear axes

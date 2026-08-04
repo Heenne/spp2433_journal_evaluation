@@ -11,6 +11,7 @@ start = "python -m src.main"
 
 [dependencies]
 python = ">=3.10"
+scipy = ">=1.18.0,<2"
 
 [pypi-dependencies]
 PyQt6 = ">=6.4.0"

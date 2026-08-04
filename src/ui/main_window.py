@@ -7,11 +7,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QAction
 from src.ui.plot_canvas import PlotCanvas
 from src.ui.control_panel import ControlPanel
-from src.data.parser import parse_point_cloud_csv
+from src.data.parser import parse_point_cloud_file
 from src.data.filter import (
     filter_by_stride, filter_by_random_percentage, check_cached_filtered_files, 
-    save_filtered_data, load_filter_config, save_filter_config
+    save_filtered_data, load_filter_config, save_filter_config,
+    filter_by_zscore, filter_by_bounding_box, filter_by_sor
 )
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -28,7 +30,7 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("File")
         
-        open_action = QAction("Open CSV...", self)
+        open_action = QAction("Open File...", self)
         open_action.triggered.connect(self.open_file_dialog)
         file_menu.addAction(open_action)
         
@@ -62,10 +64,18 @@ class MainWindow(QMainWindow):
         self.control_panel.save_data_requested.connect(self.save_filtered_dataset)
         
         # Plot Canvas
+        plot_layout = QVBoxLayout()
         self.plot_canvas = PlotCanvas(self)
+        self.toolbar = NavigationToolbar(self.plot_canvas, self)
+        
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.plot_canvas)
+        
+        plot_widget = QWidget()
+        plot_widget.setLayout(plot_layout)
         
         layout.addWidget(self.control_panel, 1) # proportion 1
-        layout.addWidget(self.plot_canvas, 3) # proportion 3
+        layout.addWidget(plot_widget, 3) # proportion 3
         
         central_widget.setLayout(layout)
         
@@ -130,7 +140,7 @@ class MainWindow(QMainWindow):
         
     def open_file_dialog(self):
         filepaths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Point Cloud CSV", "", "CSV Files (*.csv);;All Files (*)"
+            self, "Open Point Cloud File", "", "Point Cloud Files (*.csv *.ply);;CSV Files (*.csv);;PLY Files (*.ply);;All Files (*)"
         )
         
         if filepaths:
@@ -161,7 +171,7 @@ class MainWindow(QMainWindow):
     def load_file(self, filepath: str):
         self.statusBar().showMessage(f"Loading {filepath}...")
         
-        df, add_cols, err = parse_point_cloud_csv(filepath)
+        df, add_cols, err = parse_point_cloud_file(filepath)
         if err:
             QMessageBox.critical(self, "Error", err)
             self.statusBar().showMessage("Error loading file.")
@@ -181,7 +191,15 @@ class MainWindow(QMainWindow):
                 "color_col": None,
                 "invert_x": False,
                 "invert_y": False,
-                "invert_z": False
+                "invert_z": False,
+                "zscore_enabled": False,
+                "zscore_threshold": 3.0,
+                "sor_enabled": False,
+                "sor_k": 50,
+                "sor_std": 1.0,
+                "bbox_enabled": False,
+                "bbox_zmin": -1000.0,
+                "bbox_zmax": 1000.0
             }
             if len(df) > 100000:
                 msg = QMessageBox()
@@ -233,16 +251,7 @@ class MainWindow(QMainWindow):
             self.datasets[idx]["settings"] = st
             
             # Save config
-            save_filter_config(
-                self.datasets[idx]["filepath"], 
-                st["stride"], 
-                st["rand_pct"], 
-                st["color_col"], 
-                st["base_color"],
-                st.get("invert_x", False),
-                st.get("invert_y", False),
-                st.get("invert_z", False)
-            )
+            save_filter_config(self.datasets[idx]["filepath"], st)
             self.update_plot()
             
     def update_plot(self):
@@ -254,6 +263,20 @@ class MainWindow(QMainWindow):
             st = d["settings"]
             
             df_filtered = df
+            
+            if st.get("bbox_enabled"):
+                df_filtered = filter_by_bounding_box(
+                    df_filtered, 
+                    z_min=st.get("bbox_zmin"), 
+                    z_max=st.get("bbox_zmax")
+                )
+            
+            if st.get("zscore_enabled"):
+                df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
+                
+            if st.get("sor_enabled"):
+                df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
+            
             if st["stride"] > 1:
                 df_filtered = filter_by_stride(df_filtered, st["stride"])
             if st["rand_pct"] < 1.0:
@@ -284,6 +307,20 @@ class MainWindow(QMainWindow):
         st = dataset["settings"]
         
         df_filtered = df
+        
+        if st.get("bbox_enabled"):
+            df_filtered = filter_by_bounding_box(
+                df_filtered, 
+                z_min=st.get("bbox_zmin"), 
+                z_max=st.get("bbox_zmax")
+            )
+        
+        if st.get("zscore_enabled"):
+            df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
+            
+        if st.get("sor_enabled"):
+            df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
+            
         if st["stride"] > 1:
             df_filtered = filter_by_stride(df_filtered, st["stride"])
         if st["rand_pct"] < 1.0:

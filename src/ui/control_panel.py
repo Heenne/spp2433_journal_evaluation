@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QSlider, QComboBox, 
-    QCheckBox, QPushButton, QGroupBox, QHBoxLayout, QFileDialog, QListWidget, QListWidgetItem
+    QCheckBox, QPushButton, QGroupBox, QHBoxLayout, QFileDialog, QListWidget, QListWidgetItem,
+    QDoubleSpinBox, QSpinBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -71,6 +72,70 @@ class ControlPanel(QWidget):
         settings_layout.addWidget(self.stride_slider)
         settings_layout.addWidget(self.rand_label)
         settings_layout.addWidget(self.rand_slider)
+        
+        # --- Filters Group ---
+        filter_group = QGroupBox("Outlier Filters")
+        filter_layout = QVBoxLayout()
+        
+        # Z-Score
+        zscore_layout = QHBoxLayout()
+        self.zscore_check = QCheckBox("Z-Score")
+        self.zscore_check.stateChanged.connect(self._on_settings_changed)
+        self.zscore_spin = QDoubleSpinBox()
+        self.zscore_spin.setRange(0.1, 10.0)
+        self.zscore_spin.setValue(3.0)
+        self.zscore_spin.setSingleStep(0.1)
+        self.zscore_spin.valueChanged.connect(self._on_settings_changed)
+        zscore_layout.addWidget(self.zscore_check)
+        zscore_layout.addWidget(self.zscore_spin)
+        filter_layout.addLayout(zscore_layout)
+        
+        # SOR Filter
+        sor_layout = QHBoxLayout()
+        self.sor_check = QCheckBox("SOR")
+        self.sor_check.stateChanged.connect(self._on_settings_changed)
+        self.sor_k_spin = QSpinBox()
+        self.sor_k_spin.setRange(1, 1000)
+        self.sor_k_spin.setValue(50)
+        self.sor_k_spin.setToolTip("Neighbors (k)")
+        self.sor_k_spin.valueChanged.connect(self._on_settings_changed)
+        self.sor_std_spin = QDoubleSpinBox()
+        self.sor_std_spin.setRange(0.1, 10.0)
+        self.sor_std_spin.setValue(1.0)
+        self.sor_std_spin.setToolTip("Std Ratio")
+        self.sor_std_spin.valueChanged.connect(self._on_settings_changed)
+        sor_layout.addWidget(self.sor_check)
+        sor_layout.addWidget(QLabel("k:"))
+        sor_layout.addWidget(self.sor_k_spin)
+        sor_layout.addWidget(QLabel("Std:"))
+        sor_layout.addWidget(self.sor_std_spin)
+        filter_layout.addLayout(sor_layout)
+        
+        # BBox Filter (Z only for simplicity, could be expanded)
+        bbox_layout = QVBoxLayout()
+        self.bbox_check = QCheckBox("Z-Bounds")
+        self.bbox_check.stateChanged.connect(self._on_settings_changed)
+        bbox_layout.addWidget(self.bbox_check)
+        
+        bbox_grid = QHBoxLayout()
+        self.bbox_zmin = QDoubleSpinBox()
+        self.bbox_zmin.setRange(-10000, 10000)
+        self.bbox_zmin.setValue(-1000)
+        self.bbox_zmin.valueChanged.connect(self._on_settings_changed)
+        self.bbox_zmax = QDoubleSpinBox()
+        self.bbox_zmax.setRange(-10000, 10000)
+        self.bbox_zmax.setValue(1000)
+        self.bbox_zmax.valueChanged.connect(self._on_settings_changed)
+        
+        bbox_grid.addWidget(QLabel("Min:"))
+        bbox_grid.addWidget(self.bbox_zmin)
+        bbox_grid.addWidget(QLabel("Max:"))
+        bbox_grid.addWidget(self.bbox_zmax)
+        bbox_layout.addLayout(bbox_grid)
+        filter_layout.addLayout(bbox_layout)
+        
+        filter_group.setLayout(filter_layout)
+        settings_layout.addWidget(filter_group)
         
         # Colors
         settings_layout.addWidget(QLabel("Base Color:"))
@@ -174,6 +239,15 @@ class ControlPanel(QWidget):
         self.invert_y_check.blockSignals(True)
         self.invert_z_check.blockSignals(True)
         
+        self.zscore_check.blockSignals(True)
+        self.zscore_spin.blockSignals(True)
+        self.sor_check.blockSignals(True)
+        self.sor_k_spin.blockSignals(True)
+        self.sor_std_spin.blockSignals(True)
+        self.bbox_check.blockSignals(True)
+        self.bbox_zmin.blockSignals(True)
+        self.bbox_zmax.blockSignals(True)
+        
         if "stride" in config:
             val = config["stride"]
             self.stride_slider.setValue(val)
@@ -199,6 +273,15 @@ class ControlPanel(QWidget):
         self.invert_x_check.setChecked(config.get("invert_x", False))
         self.invert_y_check.setChecked(config.get("invert_y", False))
         self.invert_z_check.setChecked(config.get("invert_z", False))
+        
+        self.zscore_check.setChecked(config.get("zscore_enabled", False))
+        self.zscore_spin.setValue(config.get("zscore_threshold", 3.0))
+        self.sor_check.setChecked(config.get("sor_enabled", False))
+        self.sor_k_spin.setValue(config.get("sor_k", 50))
+        self.sor_std_spin.setValue(config.get("sor_std", 1.0))
+        self.bbox_check.setChecked(config.get("bbox_enabled", False))
+        self.bbox_zmin.setValue(config.get("bbox_zmin", -1000.0))
+        self.bbox_zmax.setValue(config.get("bbox_zmax", 1000.0))
             
         self.stride_slider.blockSignals(False)
         self.rand_slider.blockSignals(False)
@@ -207,6 +290,14 @@ class ControlPanel(QWidget):
         self.invert_x_check.blockSignals(False)
         self.invert_y_check.blockSignals(False)
         self.invert_z_check.blockSignals(False)
+        self.zscore_check.blockSignals(False)
+        self.zscore_spin.blockSignals(False)
+        self.sor_check.blockSignals(False)
+        self.sor_k_spin.blockSignals(False)
+        self.sor_std_spin.blockSignals(False)
+        self.bbox_check.blockSignals(False)
+        self.bbox_zmin.blockSignals(False)
+        self.bbox_zmax.blockSignals(False)
         self.blockSignals(False)
         
     def get_current_settings(self) -> dict:
@@ -217,5 +308,13 @@ class ControlPanel(QWidget):
             "color_col": self.color_combo.currentText() if self.color_combo.currentText() != "None" else None,
             "invert_x": self.invert_x_check.isChecked(),
             "invert_y": self.invert_y_check.isChecked(),
-            "invert_z": self.invert_z_check.isChecked()
+            "invert_z": self.invert_z_check.isChecked(),
+            "zscore_enabled": self.zscore_check.isChecked(),
+            "zscore_threshold": self.zscore_spin.value(),
+            "sor_enabled": self.sor_check.isChecked(),
+            "sor_k": self.sor_k_spin.value(),
+            "sor_std": self.sor_std_spin.value(),
+            "bbox_enabled": self.bbox_check.isChecked(),
+            "bbox_zmin": self.bbox_zmin.value(),
+            "bbox_zmax": self.bbox_zmax.value()
         }

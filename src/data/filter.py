@@ -12,17 +12,8 @@ def get_config_filename(original_filepath: str) -> str:
         os.makedirs(filtered_dir)
     return os.path.join(filtered_dir, f"{name}_config.json")
 
-def save_filter_config(original_filepath: str, stride: int, rand_pct: float, color_col: str, base_color: str = None, invert_x: bool = False, invert_y: bool = False, invert_z: bool = False):
+def save_filter_config(original_filepath: str, config: dict):
     config_file = get_config_filename(original_filepath)
-    config = {
-        "stride": stride,
-        "rand_pct": rand_pct,
-        "color_col": color_col,
-        "base_color": base_color,
-        "invert_x": invert_x,
-        "invert_y": invert_y,
-        "invert_z": invert_z
-    }
     with open(config_file, 'w') as f:
         json.dump(config, f)
 
@@ -51,6 +42,70 @@ def filter_by_random_percentage(df: pd.DataFrame, percentage: float) -> pd.DataF
     # We use sample() with a fixed random state for reproducibility if desired, but 
     # for a visualization tool, true randomness is fine.
     return df.sample(frac=percentage).copy()
+
+def filter_by_zscore(df: pd.DataFrame, threshold: float = 3.0) -> pd.DataFrame:
+    """Removes points where X, Y, or Z deviates more than threshold * std from the mean."""
+    if df.empty or threshold <= 0:
+        return df
+    
+    # Calculate Z-scores for X, Y, Z
+    z_x = np.abs((df['X'] - df['X'].mean()) / df['X'].std())
+    z_y = np.abs((df['Y'] - df['Y'].mean()) / df['Y'].std())
+    z_z = np.abs((df['Z'] - df['Z'].mean()) / df['Z'].std())
+    
+    # Keep points where all Z-scores are below threshold
+    mask = (z_x < threshold) & (z_y < threshold) & (z_z < threshold)
+    return df[mask].copy()
+
+def filter_by_bounding_box(df: pd.DataFrame, x_min: float = None, x_max: float = None, 
+                           y_min: float = None, y_max: float = None, 
+                           z_min: float = None, z_max: float = None) -> pd.DataFrame:
+    """Removes points outside the specified coordinate limits."""
+    if df.empty:
+        return df
+        
+    mask = pd.Series(True, index=df.index)
+    if x_min is not None: mask &= (df['X'] >= x_min)
+    if x_max is not None: mask &= (df['X'] <= x_max)
+    if y_min is not None: mask &= (df['Y'] >= y_min)
+    if y_max is not None: mask &= (df['Y'] <= y_max)
+    if z_min is not None: mask &= (df['Z'] >= z_min)
+    if z_max is not None: mask &= (df['Z'] <= z_max)
+    
+    return df[mask].copy()
+
+def filter_by_sor(df: pd.DataFrame, num_neighbors: int = 50, std_ratio: float = 1.0) -> pd.DataFrame:
+    """
+    Statistical Outlier Removal (SOR) using scipy.spatial.cKDTree.
+    Removes points whose mean distance to neighbors is > mean_dist + std_ratio * std_dist.
+    """
+    if df.empty or num_neighbors <= 0:
+        return df
+        
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        print("Warning: scipy is not installed. SOR filter skipped.")
+        return df
+        
+    points = df[['X', 'Y', 'Z']].values
+    if len(points) <= num_neighbors:
+        return df
+        
+    tree = cKDTree(points)
+    # k=num_neighbors+1 because the point itself is the closest neighbor (distance 0)
+    distances, _ = tree.query(points, k=num_neighbors + 1)
+    
+    # Mean distance to k nearest neighbors (excluding self)
+    mean_distances = np.mean(distances[:, 1:], axis=1)
+    
+    global_mean = np.mean(mean_distances)
+    global_std = np.std(mean_distances)
+    
+    threshold = global_mean + std_ratio * global_std
+    mask = mean_distances <= threshold
+    
+    return df[mask].copy()
 
 def get_filtered_filename(original_filepath: str, filter_type: str, filter_val: str) -> str:
     """Generates the filepath for the filtered dataset."""
