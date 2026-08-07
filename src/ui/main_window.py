@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
-    QMessageBox, QMenuBar, QMenu, QApplication
+    QMessageBox, QMenuBar, QMenu, QApplication, QProgressBar, QPushButton
 )
 from PyQt6.QtGui import QAction
 from src.ui.plot_canvas import PlotCanvas
@@ -15,6 +15,7 @@ from src.data.filter import (
     filter_by_zscore, filter_by_bounding_box, filter_by_sor, filter_by_voxel_grid
 )
 from src.utils.registration import run_icp, euler_translation_to_matrix
+from src.utils.worker import WorkerThread
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 
 class MainWindow(QMainWindow):
@@ -44,6 +45,9 @@ class MainWindow(QMainWindow):
         save_proj_action.triggered.connect(self.save_project_dialog)
         file_menu.addAction(save_proj_action)
         
+        self.recent_menu = file_menu.addMenu("Recent Projects")
+        self.update_recent_projects_menu()
+        
         # Tools Menu
         tools_menu = menu_bar.addMenu("Tools")
         convert_action = QAction("Convert TXT to CSV...", self)
@@ -59,6 +63,18 @@ class MainWindow(QMainWindow):
         # Central Widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        
+        # Status Bar with Progress Bar and Cancel Button
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0) # Indeterminate
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.hide()
+        self.statusBar().addPermanentWidget(self.progress_bar)
+        
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.cancel_workers)
+        self.btn_cancel.hide()
+        self.statusBar().addPermanentWidget(self.btn_cancel)
         
         layout = QHBoxLayout()
         
@@ -89,6 +105,34 @@ class MainWindow(QMainWindow):
         layout.addWidget(plot_widget, 3) # proportion 3
         
         central_widget.setLayout(layout)
+        
+    def set_loading_state(self, is_loading: bool, message: str = ""):
+        from PyQt6.QtCore import Qt
+        if is_loading:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.progress_bar.show()
+            self.btn_cancel.show()
+            self.statusBar().showMessage(message)
+            self.control_panel.setEnabled(False)
+            self.menuBar().setEnabled(False)
+        else:
+            QApplication.restoreOverrideCursor()
+            self.progress_bar.hide()
+            self.btn_cancel.hide()
+            self.control_panel.setEnabled(True)
+            self.menuBar().setEnabled(True)
+            self.statusBar().showMessage(message if message else "Ready.")
+            
+    def cancel_workers(self):
+        if hasattr(self, 'load_worker') and self.load_worker.isRunning():
+            self.load_worker.cancel()
+        if hasattr(self, 'update_worker') and self.update_worker.isRunning():
+            self.update_worker.cancel()
+        if hasattr(self, 'icp_worker') and self.icp_worker.isRunning():
+            self.icp_worker.cancel()
+        if hasattr(self, 'save_worker') and self.save_worker.isRunning():
+            self.save_worker.cancel()
+        self.statusBar().showMessage("Cancelling... (Waiting for worker to abort)")
         
     def open_convert_dialog(self):
         filepaths, _ = QFileDialog.getOpenFileNames(
@@ -174,26 +218,81 @@ class MainWindow(QMainWindow):
             
             self.load_file(filepath)
             
+    def update_recent_projects_menu(self):
+        self.recent_menu.clear()
+        from src.utils.app_settings import load_app_settings
+        settings = load_app_settings()
+        recent = settings.get("recent_projects", [])
+        
+        if not recent:
+            empty_action = QAction("No recent projects", self)
+            empty_action.setEnabled(False)
+            self.recent_menu.addAction(empty_action)
+            return
+            
+        for fp in recent:
+            if os.path.exists(fp):
+                action = QAction(os.path.basename(fp), self)
+                action.setToolTip(fp)
+                action.triggered.connect(lambda checked, path=fp: self.open_specific_project(path))
+                self.recent_menu.addAction(action)
+
+    def add_recent_project(self, filepath: str):
+        from src.utils.app_settings import load_app_settings, save_app_settings
+        settings = load_app_settings()
+        recent = settings.get("recent_projects", [])
+        
+        if filepath in recent:
+            recent.remove(filepath)
+        recent.insert(0, filepath)
+        
+        # Keep top 5
+        recent = recent[:5]
+        settings["recent_projects"] = recent
+        save_app_settings(settings)
+        self.update_recent_projects_menu()
+
+    def open_specific_project(self, filepath: str):
+        if len(self.datasets) > 0:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Clear Existing Data")
+            msg.setText("Opening a project will remove all currently loaded point clouds.")
+            msg.setInformativeText("Are you sure you want to proceed?")
+            btn_yes = msg.addButton("Yes, open project", QMessageBox.ButtonRole.YesRole)
+            btn_no = msg.addButton("Cancel", QMessageBox.ButtonRole.NoRole)
+            msg.exec()
+            
+            if msg.clickedButton() != btn_yes:
+                return
+                
+        try:
+            import json
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            
+            # Clear existing datasets
+            for i in range(len(self.datasets) - 1, -1, -1):
+                self.remove_dataset(i)
+            
+            # Load all files in the project
+            for fp in data.get("datasets", []):
+                if os.path.exists(fp):
+                    self.load_file(fp)
+                else:
+                    QMessageBox.warning(self, "Missing File", f"Could not find dataset file:\n{fp}")
+                    
+            self.statusBar().showMessage(f"Loaded project: {filepath}")
+            self.add_recent_project(filepath)
+        except Exception as e:
+            QMessageBox.critical(self, "Project Load Error", f"Failed to load project:\n{str(e)}")
+
     def open_project_dialog(self):
         filepath, _ = QFileDialog.getOpenFileName(
             self, "Open Project", "", "Project Files (*.json);;All Files (*)"
         )
         if filepath:
-            try:
-                import json
-                with open(filepath, 'r') as f:
-                    data = json.load(f)
-                
-                # Load all files in the project
-                for fp in data.get("datasets", []):
-                    if os.path.exists(fp):
-                        self.load_file(fp)
-                    else:
-                        QMessageBox.warning(self, "Missing File", f"Could not find dataset file:\n{fp}")
-                        
-                self.statusBar().showMessage(f"Loaded project: {filepath}")
-            except Exception as e:
-                QMessageBox.critical(self, "Project Load Error", f"Failed to load project:\n{str(e)}")
+            self.open_specific_project(filepath)
 
     def save_project_dialog(self):
         filepath, _ = QFileDialog.getSaveFileName(
@@ -208,68 +307,83 @@ class MainWindow(QMainWindow):
                 with open(filepath, 'w') as f:
                     json.dump(data, f, indent=4)
                 self.statusBar().showMessage(f"Project saved to {filepath}")
+                self.add_recent_project(filepath)
                 QMessageBox.information(self, "Success", "Project saved successfully.")
             except Exception as e:
                 QMessageBox.critical(self, "Project Save Error", f"Failed to save project:\n{str(e)}")
             
     def load_file(self, filepath: str):
-        self.statusBar().showMessage(f"Loading {filepath}...")
-        
-        df, add_cols, err = parse_point_cloud_file(filepath)
-        if err:
-            QMessageBox.critical(self, "Error", err)
-            self.statusBar().showMessage("Error loading file.")
+        if hasattr(self, 'load_worker') and self.load_worker.isRunning():
             return
             
-        name = os.path.basename(filepath)
-        self.statusBar().showMessage(f"Loaded {len(df)} points from {name}")
+        self.set_loading_state(True, f"Loading {filepath}...")
         
-        config = load_filter_config(filepath)
-        if not config:
-            cycle_colors = ["C0", "C1", "C2", "C3", "C4", "C5"]
-            idx = len(self.datasets) % len(cycle_colors)
-            
-            if not df.empty:
-                p5_x, p95_x = np.percentile(df['X'], [5, 95])
-                p5_y, p95_y = np.percentile(df['Y'], [5, 95])
-                p5_z, p95_z = np.percentile(df['Z'], [5, 95])
-                max_dim = max(p95_x - p5_x, p95_y - p5_y, p95_z - p5_z)
-                auto_voxel_size = max_dim * 0.01
-                if auto_voxel_size <= 0:
-                    auto_voxel_size = 0.1
-            else:
-                auto_voxel_size = 0.1
+        self.load_worker = WorkerThread(parse_point_cloud_file, filepath)
+        
+        def on_finished(result):
+            df, add_cols, err = result
+            if err:
+                self.set_loading_state(False, "Error loading file.")
+                QMessageBox.critical(self, "Error", err)
+                return
                 
-            config = {
-                "base_color": cycle_colors[idx], "color_col": None,
-                "invert_x": False, "invert_y": False, "invert_z": False,
-                "zscore_enabled": False, "zscore_threshold": 3.0,
-                "sor_enabled": False, "sor_k": 50, "sor_std": 1.0,
-                "bbox_enabled": False, "bbox_zmin": -1000.0, "bbox_zmax": 1000.0,
-                "voxel_enabled": False, "voxel_size": auto_voxel_size,
-                "tx": 0.0, "ty": 0.0, "tz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0
-            }
-            if len(df) > 100000:
-                config["voxel_enabled"] = True
-                QMessageBox.information(
-                    self, 
-                    "Auto-Filter Activated", 
-                    f"This dataset has {len(df):,} points which could cause lag.\n\n"
-                    f"A Voxel Downsample filter has been automatically enabled with a size of {auto_voxel_size:.3f} units."
-                )
+            name = os.path.basename(filepath)
+            
+            config = load_filter_config(filepath)
+            if not config:
+                cycle_colors = ["C0", "C1", "C2", "C3", "C4", "C5"]
+                idx = len(self.datasets) % len(cycle_colors)
+                
+                if not df.empty:
+                    p5_x, p95_x = np.percentile(df['X'], [5, 95])
+                    p5_y, p95_y = np.percentile(df['Y'], [5, 95])
+                    p5_z, p95_z = np.percentile(df['Z'], [5, 95])
+                    max_dim = max(p95_x - p5_x, p95_y - p5_y, p95_z - p5_z)
+                    auto_voxel_size = max_dim * 0.01
+                    if auto_voxel_size <= 0:
+                        auto_voxel_size = 0.1
+                else:
+                    auto_voxel_size = 0.1
                     
-        dataset = {
-            "filepath": filepath,
-            "name": name,
-            "df": df,
-            "settings": config,
-            "visible": True,
-            "add_cols": add_cols
-        }
-        
-        self.datasets.append(dataset)
-        self.control_panel.add_dataset_to_list(name, checked=True)
-        self.update_plot()
+                config = {
+                    "base_color": cycle_colors[idx], "color_col": None,
+                    "invert_x": False, "invert_y": False, "invert_z": False,
+                    "zscore_enabled": False, "zscore_threshold": 3.0,
+                    "sor_enabled": False, "sor_k": 50, "sor_std": 1.0,
+                    "bbox_enabled": False, "bbox_zmin": -1000.0, "bbox_zmax": 1000.0,
+                    "voxel_enabled": False, "voxel_size": auto_voxel_size,
+                    "tx": 0.0, "ty": 0.0, "tz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0
+                }
+                if len(df) > 100000:
+                    config["voxel_enabled"] = True
+                    QMessageBox.information(
+                        self, 
+                        "Auto-Filter Activated", 
+                        f"This dataset has {len(df):,} points which could cause lag.\n\n"
+                        f"A Voxel Downsample filter has been automatically enabled with a size of {auto_voxel_size:.3f} units."
+                    )
+                        
+            dataset = {
+                "filepath": filepath,
+                "name": name,
+                "df": df,
+                "settings": config,
+                "visible": True,
+                "add_cols": add_cols
+            }
+            
+            self.datasets.append(dataset)
+            self.control_panel.add_dataset_to_list(name, checked=True)
+            self.set_loading_state(False)
+            self.update_plot()
+            
+        def on_error(err_str):
+            self.set_loading_state(False, "Error loading file.")
+            QMessageBox.critical(self, "Error", f"Failed to load file: {err_str}")
+            
+        self.load_worker.finished.connect(on_finished)
+        self.load_worker.error.connect(on_error)
+        self.load_worker.start()
         
     def remove_dataset(self, idx: int):
         if 0 <= idx < len(self.datasets):
@@ -318,73 +432,95 @@ class MainWindow(QMainWindow):
         df_out['Z'] = transformed_points[:, 2]
         return df_out
             
-    def update_plot(self):
-        from PyQt6.QtCore import Qt
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage("Updating plot (processing filters)...")
-        QApplication.processEvents()
-        
-        try:
-            for d in self.datasets:
-                if not d["visible"]:
-                    continue
-                    
-                df = d["df"]
-                st = d["settings"]
+    def process_filters_background(self, datasets):
+        results = []
+        for d in datasets:
+            if not d["visible"]:
+                results.append((None, d))
+                continue
                 
-                # Apply Spatial Transformation first
-                df_filtered = self.apply_transform(df, st)
-                
-                if st.get("bbox_enabled"):
-                    df_filtered = filter_by_bounding_box(
-                        df_filtered, 
-                        z_min=st.get("bbox_zmin"), 
-                        z_max=st.get("bbox_zmax")
-                    )
-                
-                if st.get("zscore_enabled"):
-                    df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
-                    
-                if st.get("sor_enabled"):
-                    df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
-                    
-                if st.get("voxel_enabled"):
-                    df_filtered = filter_by_voxel_grid(df_filtered, st.get("voxel_size", 0.1))
-                    
-                d["df_filtered"] = df_filtered
-                
-            self.plot_canvas.plot_datasets(self.datasets)
+            df = d["df"]
+            st = d["settings"]
             
-            total_points = sum([len(d["df_filtered"]) for d in self.datasets if d["visible"] and "df_filtered" in d])
-            self.statusBar().showMessage(f"Showing {total_points} total points across {sum(1 for d in self.datasets if d['visible'])} dataset(s).")
-        finally:
-            QApplication.restoreOverrideCursor()
+            df_filtered = self.apply_transform(df, st)
+            
+            if st.get("bbox_enabled"):
+                df_filtered = filter_by_bounding_box(df_filtered, z_min=st.get("bbox_zmin"), z_max=st.get("bbox_zmax"))
+            if st.get("zscore_enabled"):
+                df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
+            if st.get("sor_enabled"):
+                df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
+            if st.get("voxel_enabled"):
+                df_filtered = filter_by_voxel_grid(df_filtered, st.get("voxel_size", 0.1))
+                
+            results.append((df_filtered, d))
+        return results
 
-    def on_run_icp(self, source_idx: int, target_idx: int, max_corr_dist: float):
-        from PyQt6.QtCore import Qt
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage("Running ICP Alignment...")
-        QApplication.processEvents()
+    def update_plot(self):
+        if hasattr(self, 'update_worker') and self.update_worker.isRunning():
+            return
+            
+        self.set_loading_state(True, "Updating plot (processing filters)...")
         
-        try:
-            source_dataset = self.datasets[source_idx]
-            target_dataset = self.datasets[target_idx]
+        self.update_worker = WorkerThread(self.process_filters_background, self.datasets)
+        
+        def on_finished(results):
+            for df_filtered, d in results:
+                if df_filtered is not None:
+                    d["df_filtered"] = df_filtered
+                    
+            self.plot_canvas.plot_datasets(self.datasets)
+            total_points = sum([len(d["df_filtered"]) for d in self.datasets if d["visible"] and "df_filtered" in d])
+            msg = f"Showing {total_points} total points across {sum(1 for d in self.datasets if d['visible'])} dataset(s)."
+            self.set_loading_state(False, msg)
             
-            source_df = self.apply_transform(source_dataset["df"], source_dataset["settings"])
-            target_df = self.apply_transform(target_dataset["df"], target_dataset["settings"])
+        def on_error(err_str):
+            self.set_loading_state(False, "Error updating plot.")
+            QMessageBox.critical(self, "Plot Error", f"Failed to filter data: {err_str}")
             
-            # Optional: Downsample for ICP to speed it up
-            if len(source_df) > 50000:
-                source_df = filter_by_voxel_grid(source_df, 0.5)
-            if len(target_df) > 50000:
-                target_df = filter_by_voxel_grid(target_df, 0.5)
-                
-            result, fitness = run_icp(source_df, target_df, max_correspondence_distance=max_corr_dist)
+        self.update_worker.finished.connect(on_finished)
+        self.update_worker.error.connect(on_error)
+        self.update_worker.start()
+
+    def run_icp_background(self, source_dataset, target_dataset, max_corr_dist, method, progress_callback=None, is_cancelled_callback=None):
+        if progress_callback:
+            progress_callback("Applying initial transforms to data...")
+            
+        source_df = self.apply_transform(source_dataset["df"], source_dataset["settings"])
+        target_df = self.apply_transform(target_dataset["df"], target_dataset["settings"])
+        
+        if len(source_df) > 50000:
+            if progress_callback:
+                progress_callback("Downsampling source cloud for performance...")
+            source_df = filter_by_voxel_grid(source_df, 0.5)
+            
+        if len(target_df) > 50000:
+            if progress_callback:
+                progress_callback("Downsampling target cloud for performance...")
+            target_df = filter_by_voxel_grid(target_df, 0.5)
+            
+        result, fitness = run_icp(source_df, target_df, max_correspondence_distance=max_corr_dist, method=method, progress_callback=progress_callback, is_cancelled_callback=is_cancelled_callback)
+        return result, fitness, source_dataset
+
+    def on_run_icp(self, source_idx: int, target_idx: int, max_corr_dist: float, method: str):
+        if hasattr(self, 'icp_worker') and self.icp_worker.isRunning():
+            return
+            
+        self.set_loading_state(True, "Running ICP Alignment...")
+        
+        source_dataset = self.datasets[source_idx]
+        target_dataset = self.datasets[target_idx]
+        
+        self.icp_worker = WorkerThread(self.run_icp_background, source_dataset, target_dataset, max_corr_dist, method, inject_progress=True, inject_cancelled=True)
+        self.icp_worker.progress.connect(lambda msg: self.statusBar().showMessage(msg))
+        
+        def on_finished(res):
+            result, fitness, s_dataset = res
+            self.set_loading_state(False)
+            
             if result:
                 new_tx, new_ty, new_tz, new_rx, new_ry, new_rz = result
-                
-                # Combine the current transform with the new ICP result
-                st = source_dataset["settings"]
+                st = s_dataset["settings"]
                 mat_current = euler_translation_to_matrix(st.get("tx", 0.0), st.get("ty", 0.0), st.get("tz", 0.0),
                                                           st.get("rx", 0.0), st.get("ry", 0.0), st.get("rz", 0.0))
                 mat_icp = euler_translation_to_matrix(new_tx, new_ty, new_tz, new_rx, new_ry, new_rz)
@@ -400,9 +536,8 @@ class MainWindow(QMainWindow):
                 st["ry"] = fry
                 st["rz"] = frz
                 
-                save_filter_config(source_dataset["filepath"], st)
+                save_filter_config(s_dataset["filepath"], st)
                 
-                # Update UI
                 if self.control_panel.dataset_list.currentRow() == source_idx:
                     self.control_panel.apply_config(st)
                     
@@ -410,11 +545,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "ICP Complete", f"Alignment finished.\nFitness score: {fitness:.4f}")
             else:
                 QMessageBox.warning(self, "ICP Failed", "ICP Alignment failed or open3d is missing.")
-        except Exception as e:
-            QMessageBox.critical(self, "ICP Error", f"An error occurred during ICP:\n{str(e)}")
-        finally:
-            QApplication.restoreOverrideCursor()
-            self.statusBar().showMessage("Ready.")
+                
+        def on_error(err_str):
+            self.set_loading_state(False)
+            if "Cancelled by User" in err_str:
+                QMessageBox.information(self, "Cancelled", "ICP Alignment was cancelled.")
+            else:
+                QMessageBox.critical(self, "ICP Error", f"An error occurred during ICP:\n{err_str}")
+            
+        self.icp_worker.finished.connect(on_finished)
+        self.icp_worker.error.connect(on_error)
+        self.icp_worker.start()
         
     def export_plot(self, filepath: str):
         try:
@@ -423,39 +564,44 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export plot: {str(e)}")
             
+    def save_data_background(self, dataset):
+        df = dataset["df"]
+        st = dataset["settings"]
+        
+        df_filtered = self.apply_transform(df, st)
+        if st.get("bbox_enabled"):
+            df_filtered = filter_by_bounding_box(df_filtered, z_min=st.get("bbox_zmin"), z_max=st.get("bbox_zmax"))
+        if st.get("zscore_enabled"):
+            df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
+        if st.get("sor_enabled"):
+            df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
+        if st.get("voxel_enabled"):
+            df_filtered = filter_by_voxel_grid(df_filtered, st.get("voxel_size", 0.1))
+            
+        new_fp = save_filtered_data(df_filtered, dataset["filepath"], "downsample", "transformed")
+        return new_fp
+
     def save_filtered_dataset(self):
         idx = self.control_panel.dataset_list.currentRow()
         if idx < 0 or idx >= len(self.datasets):
             return
             
+        if hasattr(self, 'save_worker') and self.save_worker.isRunning():
+            return
+            
         dataset = self.datasets[idx]
-        df = dataset["df"]
-        st = dataset["settings"]
+        self.set_loading_state(True, "Saving dataset...")
         
-        from PyQt6.QtCore import Qt
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage("Saving dataset...")
-        QApplication.processEvents()
+        self.save_worker = WorkerThread(self.save_data_background, dataset)
         
-        try:
-            df_filtered = self.apply_transform(df, st)
-            
-            if st.get("bbox_enabled"):
-                df_filtered = filter_by_bounding_box(df_filtered, z_min=st.get("bbox_zmin"), z_max=st.get("bbox_zmax"))
-            if st.get("zscore_enabled"):
-                df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
-            if st.get("sor_enabled"):
-                df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
-                
-            if st.get("voxel_enabled"):
-                df_filtered = filter_by_voxel_grid(df_filtered, st.get("voxel_size", 0.1))
-                
-            filter_str = "transformed"
-            
-            new_fp = save_filtered_data(df_filtered, dataset["filepath"], "downsample", filter_str)
+        def on_finished(new_fp):
+            self.set_loading_state(False, "Ready.")
             QMessageBox.information(self, "Success", f"Filtered dataset saved to:\n{new_fp}")
-        except Exception as e:
-            QMessageBox.critical(self, "Save Error", f"Failed to save data: {str(e)}")
-        finally:
-            QApplication.restoreOverrideCursor()
-            self.statusBar().showMessage("Ready.")
+            
+        def on_error(err_str):
+            self.set_loading_state(False, "Ready.")
+            QMessageBox.critical(self, "Save Error", f"Failed to save data: {err_str}")
+            
+        self.save_worker.finished.connect(on_finished)
+        self.save_worker.error.connect(on_error)
+        self.save_worker.start()

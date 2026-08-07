@@ -15,7 +15,7 @@ class ControlPanel(QWidget):
     settings_changed = pyqtSignal()
     export_requested = pyqtSignal(str)
     save_data_requested = pyqtSignal()
-    run_icp_requested = pyqtSignal(int, int, float) # source_idx, target_idx, max_dist
+    run_icp_requested = pyqtSignal(int, int, float, str) # source_idx, target_idx, max_dist, method
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -226,17 +226,28 @@ class ControlPanel(QWidget):
         icp_group = QGroupBox("ICP Alignment")
         icp_layout = QFormLayout()
         self.icp_target_combo = QComboBox()
+        
+        self.icp_method_combo = QComboBox()
+        self.icp_method_combo.addItems(["Standard ICP", "Robust ICP (Partial Overlap)", "SciPy Custom Optimizer"])
+        
         self.icp_distance_spin = QDoubleSpinBox()
         self.icp_distance_spin.setRange(0.001, 10000.0)
         self.icp_distance_spin.setValue(1.0)
         self.icp_distance_spin.setDecimals(3)
-        self.icp_distance_spin.setToolTip("Maximum distance between points to be considered a match. If your clouds are roughly aligned, keep this small.")
+        self.icp_distance_spin.setToolTip("The search radius for matching points. Set this to your estimated manual alignment error in your data's units. E.g., if you are off by ~2 meters, enter 2.0. Values that are too large cause incorrect matches.")
         
         self.btn_run_icp = QPushButton("Run ICP (Selected -> Target)")
         self.btn_run_icp.clicked.connect(self._on_run_icp_clicked)
         
         icp_layout.addRow("Target (Reference):", self.icp_target_combo)
+        icp_layout.addRow("Method:", self.icp_method_combo)
         icp_layout.addRow("Max Distance:", self.icp_distance_spin)
+        
+        icp_info = QLabel("Tip: Set this to your estimated manual alignment error.\nIf you aligned them to within ~2 units, enter 2.0.\nIf this is too large, the alignment will fail.")
+        icp_info.setWordWrap(True)
+        icp_info.setStyleSheet("color: #888888; font-size: 11px; font-style: italic;")
+        icp_layout.addRow("", icp_info)
+        
         icp_layout.addRow("", self.btn_run_icp)
         icp_group.setLayout(icp_layout)
         transform_layout.addWidget(icp_group)
@@ -306,7 +317,7 @@ class ControlPanel(QWidget):
         source_idx = self.dataset_list.currentRow()
         target_idx = self.icp_target_combo.currentIndex()
         if source_idx >= 0 and target_idx >= 0 and source_idx != target_idx:
-            self.run_icp_requested.emit(source_idx, target_idx, self.icp_distance_spin.value())
+            self.run_icp_requested.emit(source_idx, target_idx, self.icp_distance_spin.value(), self.icp_method_combo.currentText())
             
     def update_columns(self, columns: list):
         self.color_combo.blockSignals(True)
