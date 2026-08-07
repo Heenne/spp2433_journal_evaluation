@@ -1,18 +1,20 @@
 import os
 import pandas as pd
+import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
-    QMessageBox, QMenuBar, QMenu
+    QMessageBox, QMenuBar, QMenu, QApplication
 )
 from PyQt6.QtGui import QAction
 from src.ui.plot_canvas import PlotCanvas
 from src.ui.control_panel import ControlPanel
 from src.data.parser import parse_point_cloud_file
 from src.data.filter import (
-    filter_by_stride, filter_by_random_percentage, check_cached_filtered_files, 
+    check_cached_filtered_files, 
     save_filtered_data, load_filter_config, save_filter_config,
-    filter_by_zscore, filter_by_bounding_box, filter_by_sor
+    filter_by_zscore, filter_by_bounding_box, filter_by_sor, filter_by_voxel_grid
 )
+from src.utils.registration import run_icp, euler_translation_to_matrix
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 
 class MainWindow(QMainWindow):
@@ -33,6 +35,14 @@ class MainWindow(QMainWindow):
         open_action = QAction("Open File...", self)
         open_action.triggered.connect(self.open_file_dialog)
         file_menu.addAction(open_action)
+        
+        open_proj_action = QAction("Open Project...", self)
+        open_proj_action.triggered.connect(self.open_project_dialog)
+        file_menu.addAction(open_proj_action)
+        
+        save_proj_action = QAction("Save Project...", self)
+        save_proj_action.triggered.connect(self.save_project_dialog)
+        file_menu.addAction(save_proj_action)
         
         # Tools Menu
         tools_menu = menu_bar.addMenu("Tools")
@@ -62,6 +72,7 @@ class MainWindow(QMainWindow):
         self.control_panel.settings_changed.connect(self.on_settings_changed)
         self.control_panel.export_requested.connect(self.export_plot)
         self.control_panel.save_data_requested.connect(self.save_filtered_dataset)
+        self.control_panel.run_icp_requested.connect(self.on_run_icp)
         
         # Plot Canvas
         plot_layout = QVBoxLayout()
@@ -144,11 +155,8 @@ class MainWindow(QMainWindow):
         )
         
         if filepaths:
-            # We handle the first selected file for simplicity in loading initially.
-            # Multi-file support can be extended, but let's load the first one.
             filepath = filepaths[0]
             
-            # Check for cached files
             cached_files = check_cached_filtered_files(filepath)
             if cached_files:
                 msg = QMessageBox()
@@ -157,8 +165,6 @@ class MainWindow(QMainWindow):
                 msg.setText("Filtered versions of this dataset exist. Load a cached version?")
                 msg.setInformativeText("This can be much faster for large files.")
                 
-                # We'll just list the first cached file as an option for simplicity, or we can build a custom dialog.
-                # Here we just offer yes/no to load the first available cached file.
                 btn_yes = msg.addButton("Yes, load cached", QMessageBox.ButtonRole.YesRole)
                 btn_no = msg.addButton("No, load original", QMessageBox.ButtonRole.NoRole)
                 msg.exec()
@@ -167,6 +173,44 @@ class MainWindow(QMainWindow):
                     filepath = cached_files[0]
             
             self.load_file(filepath)
+            
+    def open_project_dialog(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Open Project", "", "Project Files (*.json);;All Files (*)"
+        )
+        if filepath:
+            try:
+                import json
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+                
+                # Load all files in the project
+                for fp in data.get("datasets", []):
+                    if os.path.exists(fp):
+                        self.load_file(fp)
+                    else:
+                        QMessageBox.warning(self, "Missing File", f"Could not find dataset file:\n{fp}")
+                        
+                self.statusBar().showMessage(f"Loaded project: {filepath}")
+            except Exception as e:
+                QMessageBox.critical(self, "Project Load Error", f"Failed to load project:\n{str(e)}")
+
+    def save_project_dialog(self):
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Project", "", "Project Files (*.json)"
+        )
+        if filepath:
+            try:
+                import json
+                data = {
+                    "datasets": [d["filepath"] for d in self.datasets]
+                }
+                with open(filepath, 'w') as f:
+                    json.dump(data, f, indent=4)
+                self.statusBar().showMessage(f"Project saved to {filepath}")
+                QMessageBox.information(self, "Success", "Project saved successfully.")
+            except Exception as e:
+                QMessageBox.critical(self, "Project Save Error", f"Failed to save project:\n{str(e)}")
             
     def load_file(self, filepath: str):
         self.statusBar().showMessage(f"Loading {filepath}...")
@@ -184,34 +228,35 @@ class MainWindow(QMainWindow):
         if not config:
             cycle_colors = ["C0", "C1", "C2", "C3", "C4", "C5"]
             idx = len(self.datasets) % len(cycle_colors)
+            
+            if not df.empty:
+                p5_x, p95_x = np.percentile(df['X'], [5, 95])
+                p5_y, p95_y = np.percentile(df['Y'], [5, 95])
+                p5_z, p95_z = np.percentile(df['Z'], [5, 95])
+                max_dim = max(p95_x - p5_x, p95_y - p5_y, p95_z - p5_z)
+                auto_voxel_size = max_dim * 0.01
+                if auto_voxel_size <= 0:
+                    auto_voxel_size = 0.1
+            else:
+                auto_voxel_size = 0.1
+                
             config = {
-                "stride": 1,
-                "rand_pct": 1.0,
-                "base_color": cycle_colors[idx],
-                "color_col": None,
-                "invert_x": False,
-                "invert_y": False,
-                "invert_z": False,
-                "zscore_enabled": False,
-                "zscore_threshold": 3.0,
-                "sor_enabled": False,
-                "sor_k": 50,
-                "sor_std": 1.0,
-                "bbox_enabled": False,
-                "bbox_zmin": -1000.0,
-                "bbox_zmax": 1000.0
+                "base_color": cycle_colors[idx], "color_col": None,
+                "invert_x": False, "invert_y": False, "invert_z": False,
+                "zscore_enabled": False, "zscore_threshold": 3.0,
+                "sor_enabled": False, "sor_k": 50, "sor_std": 1.0,
+                "bbox_enabled": False, "bbox_zmin": -1000.0, "bbox_zmax": 1000.0,
+                "voxel_enabled": False, "voxel_size": auto_voxel_size,
+                "tx": 0.0, "ty": 0.0, "tz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0
             }
             if len(df) > 100000:
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Icon.Warning)
-                msg.setWindowTitle("Massive Dataset Detected")
-                msg.setText(f"This dataset has {len(df)} points. Would you like to automatically apply a strict 10% random sample filter before rendering?")
-                btn_yes = msg.addButton("Yes, apply strict filter", QMessageBox.ButtonRole.YesRole)
-                btn_no = msg.addButton("No, render anyway", QMessageBox.ButtonRole.NoRole)
-                msg.exec()
-                
-                if msg.clickedButton() == btn_yes:
-                    config["rand_pct"] = 0.1
+                config["voxel_enabled"] = True
+                QMessageBox.information(
+                    self, 
+                    "Auto-Filter Activated", 
+                    f"This dataset has {len(df):,} points which could cause lag.\n\n"
+                    f"A Voxel Downsample filter has been automatically enabled with a size of {auto_voxel_size:.3f} units."
+                )
                     
         dataset = {
             "filepath": filepath,
@@ -224,7 +269,6 @@ class MainWindow(QMainWindow):
         
         self.datasets.append(dataset)
         self.control_panel.add_dataset_to_list(name, checked=True)
-        # add_dataset_to_list automatically selects it, triggering on_selection_changed
         self.update_plot()
         
     def remove_dataset(self, idx: int):
@@ -249,46 +293,128 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(self.datasets):
             st = self.control_panel.get_current_settings()
             self.datasets[idx]["settings"] = st
-            
-            # Save config
             save_filter_config(self.datasets[idx]["filepath"], st)
             self.update_plot()
             
-    def update_plot(self):
-        for d in self.datasets:
-            if not d["visible"]:
-                continue
-                
-            df = d["df"]
-            st = d["settings"]
-            
-            df_filtered = df
-            
-            if st.get("bbox_enabled"):
-                df_filtered = filter_by_bounding_box(
-                    df_filtered, 
-                    z_min=st.get("bbox_zmin"), 
-                    z_max=st.get("bbox_zmax")
-                )
-            
-            if st.get("zscore_enabled"):
-                df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
-                
-            if st.get("sor_enabled"):
-                df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
-            
-            if st["stride"] > 1:
-                df_filtered = filter_by_stride(df_filtered, st["stride"])
-            if st["rand_pct"] < 1.0:
-                df_filtered = filter_by_random_percentage(df_filtered, st["rand_pct"])
-                
-            d["df_filtered"] = df_filtered
-            
-        self.plot_canvas.plot_datasets(self.datasets)
+    def apply_transform(self, df: pd.DataFrame, settings: dict) -> pd.DataFrame:
+        """Applies manual translation and rotation to the DataFrame coordinates."""
+        tx, ty, tz = settings.get("tx", 0.0), settings.get("ty", 0.0), settings.get("tz", 0.0)
+        rx, ry, rz = settings.get("rx", 0.0), settings.get("ry", 0.0), settings.get("rz", 0.0)
         
-        # Calculate total points shown
-        total_points = sum([len(d["df_filtered"]) for d in self.datasets if d["visible"] and "df_filtered" in d])
-        self.statusBar().showMessage(f"Showing {total_points} total points across {sum(1 for d in self.datasets if d['visible'])} dataset(s).")
+        if tx == 0.0 and ty == 0.0 and tz == 0.0 and rx == 0.0 and ry == 0.0 and rz == 0.0:
+            return df
+            
+        mat = euler_translation_to_matrix(tx, ty, tz, rx, ry, rz)
+        
+        points = df[['X', 'Y', 'Z']].values
+        # Apply 4x4 matrix
+        ones = np.ones((points.shape[0], 1))
+        points_4d = np.hstack([points, ones])
+        transformed_points = (mat @ points_4d.T).T[:, :3]
+        
+        df_out = df.copy()
+        df_out['X'] = transformed_points[:, 0]
+        df_out['Y'] = transformed_points[:, 1]
+        df_out['Z'] = transformed_points[:, 2]
+        return df_out
+            
+    def update_plot(self):
+        from PyQt6.QtCore import Qt
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Updating plot (processing filters)...")
+        QApplication.processEvents()
+        
+        try:
+            for d in self.datasets:
+                if not d["visible"]:
+                    continue
+                    
+                df = d["df"]
+                st = d["settings"]
+                
+                # Apply Spatial Transformation first
+                df_filtered = self.apply_transform(df, st)
+                
+                if st.get("bbox_enabled"):
+                    df_filtered = filter_by_bounding_box(
+                        df_filtered, 
+                        z_min=st.get("bbox_zmin"), 
+                        z_max=st.get("bbox_zmax")
+                    )
+                
+                if st.get("zscore_enabled"):
+                    df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
+                    
+                if st.get("sor_enabled"):
+                    df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
+                    
+                if st.get("voxel_enabled"):
+                    df_filtered = filter_by_voxel_grid(df_filtered, st.get("voxel_size", 0.1))
+                    
+                d["df_filtered"] = df_filtered
+                
+            self.plot_canvas.plot_datasets(self.datasets)
+            
+            total_points = sum([len(d["df_filtered"]) for d in self.datasets if d["visible"] and "df_filtered" in d])
+            self.statusBar().showMessage(f"Showing {total_points} total points across {sum(1 for d in self.datasets if d['visible'])} dataset(s).")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def on_run_icp(self, source_idx: int, target_idx: int, max_corr_dist: float):
+        from PyQt6.QtCore import Qt
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Running ICP Alignment...")
+        QApplication.processEvents()
+        
+        try:
+            source_dataset = self.datasets[source_idx]
+            target_dataset = self.datasets[target_idx]
+            
+            source_df = self.apply_transform(source_dataset["df"], source_dataset["settings"])
+            target_df = self.apply_transform(target_dataset["df"], target_dataset["settings"])
+            
+            # Optional: Downsample for ICP to speed it up
+            if len(source_df) > 50000:
+                source_df = filter_by_voxel_grid(source_df, 0.5)
+            if len(target_df) > 50000:
+                target_df = filter_by_voxel_grid(target_df, 0.5)
+                
+            result, fitness = run_icp(source_df, target_df, max_correspondence_distance=max_corr_dist)
+            if result:
+                new_tx, new_ty, new_tz, new_rx, new_ry, new_rz = result
+                
+                # Combine the current transform with the new ICP result
+                st = source_dataset["settings"]
+                mat_current = euler_translation_to_matrix(st.get("tx", 0.0), st.get("ty", 0.0), st.get("tz", 0.0),
+                                                          st.get("rx", 0.0), st.get("ry", 0.0), st.get("rz", 0.0))
+                mat_icp = euler_translation_to_matrix(new_tx, new_ty, new_tz, new_rx, new_ry, new_rz)
+                
+                mat_final = mat_icp @ mat_current
+                from src.utils.registration import matrix_to_euler_translation
+                ftx, fty, ftz, frx, fry, frz = matrix_to_euler_translation(mat_final)
+                
+                st["tx"] = ftx
+                st["ty"] = fty
+                st["tz"] = ftz
+                st["rx"] = frx
+                st["ry"] = fry
+                st["rz"] = frz
+                
+                save_filter_config(source_dataset["filepath"], st)
+                
+                # Update UI
+                if self.control_panel.dataset_list.currentRow() == source_idx:
+                    self.control_panel.apply_config(st)
+                    
+                self.update_plot()
+                QMessageBox.information(self, "ICP Complete", f"Alignment finished.\nFitness score: {fitness:.4f}")
+            else:
+                QMessageBox.warning(self, "ICP Failed", "ICP Alignment failed or open3d is missing.")
+        except Exception as e:
+            QMessageBox.critical(self, "ICP Error", f"An error occurred during ICP:\n{str(e)}")
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().showMessage("Ready.")
         
     def export_plot(self, filepath: str):
         try:
@@ -306,30 +432,30 @@ class MainWindow(QMainWindow):
         df = dataset["df"]
         st = dataset["settings"]
         
-        df_filtered = df
-        
-        if st.get("bbox_enabled"):
-            df_filtered = filter_by_bounding_box(
-                df_filtered, 
-                z_min=st.get("bbox_zmin"), 
-                z_max=st.get("bbox_zmax")
-            )
-        
-        if st.get("zscore_enabled"):
-            df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
-            
-        if st.get("sor_enabled"):
-            df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
-            
-        if st["stride"] > 1:
-            df_filtered = filter_by_stride(df_filtered, st["stride"])
-        if st["rand_pct"] < 1.0:
-            df_filtered = filter_by_random_percentage(df_filtered, st["rand_pct"])
-            
-        filter_str = f"s{st['stride']}_r{int(st['rand_pct']*100)}"
+        from PyQt6.QtCore import Qt
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Saving dataset...")
+        QApplication.processEvents()
         
         try:
+            df_filtered = self.apply_transform(df, st)
+            
+            if st.get("bbox_enabled"):
+                df_filtered = filter_by_bounding_box(df_filtered, z_min=st.get("bbox_zmin"), z_max=st.get("bbox_zmax"))
+            if st.get("zscore_enabled"):
+                df_filtered = filter_by_zscore(df_filtered, st.get("zscore_threshold", 3.0))
+            if st.get("sor_enabled"):
+                df_filtered = filter_by_sor(df_filtered, st.get("sor_k", 50), st.get("sor_std", 1.0))
+                
+            if st.get("voxel_enabled"):
+                df_filtered = filter_by_voxel_grid(df_filtered, st.get("voxel_size", 0.1))
+                
+            filter_str = "transformed"
+            
             new_fp = save_filtered_data(df_filtered, dataset["filepath"], "downsample", filter_str)
             QMessageBox.information(self, "Success", f"Filtered dataset saved to:\n{new_fp}")
         except Exception as e:
             QMessageBox.critical(self, "Save Error", f"Failed to save data: {str(e)}")
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.statusBar().showMessage("Ready.")

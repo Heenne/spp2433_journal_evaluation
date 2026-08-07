@@ -43,6 +43,35 @@ def filter_by_random_percentage(df: pd.DataFrame, percentage: float) -> pd.DataF
     # for a visualization tool, true randomness is fine.
     return df.sample(frac=percentage).copy()
 
+def filter_by_voxel_grid(df: pd.DataFrame, voxel_size: float) -> pd.DataFrame:
+    """Downsamples the point cloud using a voxel grid via Open3D."""
+    if df.empty or voxel_size <= 0:
+        return df
+        
+    try:
+        import open3d as o3d
+    except ImportError:
+        print("Warning: open3d is not installed. Voxel filter skipped.")
+        return df
+        
+    points = df[['X', 'Y', 'Z']].values
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    downpcd = pcd.voxel_down_sample(voxel_size=voxel_size)
+    down_points = np.asarray(downpcd.points)
+    
+    if len(df.columns) > 3:
+        try:
+            from scipy.spatial import cKDTree
+            tree = cKDTree(points)
+            _, indices = tree.query(down_points, k=1)
+            return df.iloc[indices].copy()
+        except ImportError:
+            pass
+            
+    return pd.DataFrame(down_points, columns=['X', 'Y', 'Z'])
+
 def filter_by_zscore(df: pd.DataFrame, threshold: float = 3.0) -> pd.DataFrame:
     """Removes points where X, Y, or Z deviates more than threshold * std from the mean."""
     if df.empty or threshold <= 0:

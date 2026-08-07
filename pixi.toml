@@ -10,11 +10,13 @@ platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
 start = "python -m src.main"
 
 [dependencies]
-python = ">=3.10"
-scipy = ">=1.18.0,<2"
+python = ">=3.10,<3.12"
+scipy = "*"
 
 [pypi-dependencies]
 PyQt6 = ">=6.4.0"
 pandas = ">=2.0.0"
 matplotlib = ">=3.7.0"
 numpy = ">=1.24.0"
+open3d = "*"
+pyqt6-sip = ">=13.12.0, <14"

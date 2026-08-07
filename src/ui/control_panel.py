@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QSlider, QComboBox, 
     QCheckBox, QPushButton, QGroupBox, QHBoxLayout, QFileDialog, QListWidget, QListWidgetItem,
-    QDoubleSpinBox, QSpinBox
+    QDoubleSpinBox, QSpinBox, QTabWidget, QFormLayout
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -15,6 +15,7 @@ class ControlPanel(QWidget):
     settings_changed = pyqtSignal()
     export_requested = pyqtSignal(str)
     save_data_requested = pyqtSignal()
+    run_icp_requested = pyqtSignal(int, int, float) # source_idx, target_idx, max_dist
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -23,7 +24,7 @@ class ControlPanel(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
         
-        # --- Dataset List Group ---
+        # --- Global Dataset List ---
         list_group = QGroupBox("Loaded Point Clouds")
         list_layout = QVBoxLayout()
         
@@ -46,38 +47,72 @@ class ControlPanel(QWidget):
         btn_layout.addWidget(self.btn_add_quick_ref)
         btn_layout.addWidget(self.btn_remove)
         list_layout.addLayout(btn_layout)
-        
         list_group.setLayout(list_layout)
         layout.addWidget(list_group)
         
-        # --- Selected Dataset Settings Group ---
-        self.settings_group = QGroupBox("Selected Settings")
-        settings_layout = QVBoxLayout()
+        self.tabs = QTabWidget()
         
-        self.stride_label = QLabel("Stride (keep 1 in N): 1")
-        self.stride_slider = QSlider(Qt.Orientation.Horizontal)
-        self.stride_slider.setMinimum(1)
-        self.stride_slider.setMaximum(100)
-        self.stride_slider.setValue(1)
-        self.stride_slider.valueChanged.connect(self._on_settings_changed)
+        # --- Tab 1: Appearance ---
+        tab_data = QWidget()
+        data_layout = QVBoxLayout()
         
-        self.rand_label = QLabel("Random Sample %: 100")
-        self.rand_slider = QSlider(Qt.Orientation.Horizontal)
-        self.rand_slider.setMinimum(1)
-        self.rand_slider.setMaximum(100)
-        self.rand_slider.setValue(100)
-        self.rand_slider.valueChanged.connect(self._on_settings_changed)
+        colors_group = QGroupBox("Color Settings")
+        colors_layout = QVBoxLayout()
+        colors_layout.addWidget(QLabel("Base Color:"))
+        self.base_color_combo = QComboBox()
+        self.base_color_combo.addItems(["C0", "C1", "C2", "C3", "C4", "C5", "red", "green", "blue", "gray", "black", "orange", "purple"])
+        self.base_color_combo.currentIndexChanged.connect(self._on_settings_changed)
+        colors_layout.addWidget(self.base_color_combo)
         
-        settings_layout.addWidget(self.stride_label)
-        settings_layout.addWidget(self.stride_slider)
-        settings_layout.addWidget(self.rand_label)
-        settings_layout.addWidget(self.rand_slider)
+        colors_layout.addWidget(QLabel("Color Mapping Column (Overrides Base Color):"))
+        self.color_combo = QComboBox()
+        self.color_combo.addItem("None")
+        self.color_combo.currentIndexChanged.connect(self._on_settings_changed)
+        colors_layout.addWidget(self.color_combo)
+        colors_group.setLayout(colors_layout)
+        data_layout.addWidget(colors_group)
         
-        # --- Filters Group ---
-        filter_group = QGroupBox("Outlier Filters")
+        export_group = QGroupBox("Export")
+        export_layout = QVBoxLayout()
+        self.btn_export = QPushButton("Export Plot")
+        self.btn_export.clicked.connect(self._on_export_clicked)
+        export_layout.addWidget(self.btn_export)
+        export_group.setLayout(export_layout)
+        data_layout.addWidget(export_group)
+        
+        data_layout.addStretch()
+        tab_data.setLayout(data_layout)
+        
+        # --- Tab 2: Filtering ---
+        tab_filter = QWidget()
         filter_layout = QVBoxLayout()
         
-        # Z-Score
+        # Voxel Downsampling
+        voxel_group = QGroupBox("Voxel Grid Downsampling (Uniform)")
+        voxel_layout = QHBoxLayout()
+        self.voxel_check = QCheckBox("Enable Voxel Filter")
+        self.voxel_check.stateChanged.connect(self._on_settings_changed)
+        self.voxel_check.setToolTip("Uniformly downsamples the point cloud by merging points within 3D grid cells (voxels).")
+        
+        self.voxel_spin = QDoubleSpinBox()
+        self.voxel_spin.setRange(0.001, 1000.0)
+        self.voxel_spin.setToolTip("Size of the voxel grid cell in data units. Auto-calculated on load based on dataset bounds.")
+        self.voxel_spin.setValue(0.1)
+        self.voxel_spin.setSingleStep(0.05)
+        self.voxel_spin.setDecimals(3)
+        self.voxel_spin.valueChanged.connect(self._on_settings_changed)
+        voxel_layout.addWidget(self.voxel_check)
+        voxel_layout.addWidget(QLabel("Voxel Size:"))
+        voxel_layout.addWidget(self.voxel_spin)
+        voxel_group.setLayout(voxel_layout)
+        filter_layout.addWidget(voxel_group)
+        
+
+        
+        # Outliers
+        outlier_group = QGroupBox("Outlier Filters")
+        outlier_layout = QVBoxLayout()
+        
         zscore_layout = QHBoxLayout()
         self.zscore_check = QCheckBox("Z-Score")
         self.zscore_check.stateChanged.connect(self._on_settings_changed)
@@ -88,35 +123,30 @@ class ControlPanel(QWidget):
         self.zscore_spin.valueChanged.connect(self._on_settings_changed)
         zscore_layout.addWidget(self.zscore_check)
         zscore_layout.addWidget(self.zscore_spin)
-        filter_layout.addLayout(zscore_layout)
+        outlier_layout.addLayout(zscore_layout)
         
-        # SOR Filter
         sor_layout = QHBoxLayout()
         self.sor_check = QCheckBox("SOR")
         self.sor_check.stateChanged.connect(self._on_settings_changed)
         self.sor_k_spin = QSpinBox()
         self.sor_k_spin.setRange(1, 1000)
         self.sor_k_spin.setValue(50)
-        self.sor_k_spin.setToolTip("Neighbors (k)")
         self.sor_k_spin.valueChanged.connect(self._on_settings_changed)
         self.sor_std_spin = QDoubleSpinBox()
         self.sor_std_spin.setRange(0.1, 10.0)
         self.sor_std_spin.setValue(1.0)
-        self.sor_std_spin.setToolTip("Std Ratio")
         self.sor_std_spin.valueChanged.connect(self._on_settings_changed)
         sor_layout.addWidget(self.sor_check)
         sor_layout.addWidget(QLabel("k:"))
         sor_layout.addWidget(self.sor_k_spin)
         sor_layout.addWidget(QLabel("Std:"))
         sor_layout.addWidget(self.sor_std_spin)
-        filter_layout.addLayout(sor_layout)
+        outlier_layout.addLayout(sor_layout)
         
-        # BBox Filter (Z only for simplicity, could be expanded)
         bbox_layout = QVBoxLayout()
         self.bbox_check = QCheckBox("Z-Bounds")
         self.bbox_check.stateChanged.connect(self._on_settings_changed)
         bbox_layout.addWidget(self.bbox_check)
-        
         bbox_grid = QHBoxLayout()
         self.bbox_zmin = QDoubleSpinBox()
         self.bbox_zmin.setRange(-10000, 10000)
@@ -126,63 +156,112 @@ class ControlPanel(QWidget):
         self.bbox_zmax.setRange(-10000, 10000)
         self.bbox_zmax.setValue(1000)
         self.bbox_zmax.valueChanged.connect(self._on_settings_changed)
-        
         bbox_grid.addWidget(QLabel("Min:"))
         bbox_grid.addWidget(self.bbox_zmin)
         bbox_grid.addWidget(QLabel("Max:"))
         bbox_grid.addWidget(self.bbox_zmax)
         bbox_layout.addLayout(bbox_grid)
-        filter_layout.addLayout(bbox_layout)
+        outlier_layout.addLayout(bbox_layout)
         
-        filter_group.setLayout(filter_layout)
-        settings_layout.addWidget(filter_group)
+        outlier_group.setLayout(outlier_layout)
+        filter_layout.addWidget(outlier_group)
         
-        # Colors
-        settings_layout.addWidget(QLabel("Base Color:"))
-        self.base_color_combo = QComboBox()
-        self.base_color_combo.addItems(["C0", "C1", "C2", "C3", "C4", "C5", "red", "green", "blue", "gray", "black", "orange", "purple"])
-        self.base_color_combo.currentIndexChanged.connect(self._on_settings_changed)
-        settings_layout.addWidget(self.base_color_combo)
+        self.btn_save_data = QPushButton("Save Filtered Data")
+        self.btn_save_data.clicked.connect(self.save_data_requested.emit)
+        filter_layout.addWidget(self.btn_save_data)
         
-        settings_layout.addWidget(QLabel("Color Mapping Column (Overrides Base Color):"))
-        self.color_combo = QComboBox()
-        self.color_combo.addItem("None")
-        self.color_combo.currentIndexChanged.connect(self._on_settings_changed)
-        settings_layout.addWidget(self.color_combo)
+        filter_layout.addStretch()
+        tab_filter.setLayout(filter_layout)
         
-        # Axis Inversion
+        # --- Tab 3: Transform & Align ---
+        tab_transform = QWidget()
+        transform_layout = QVBoxLayout()
+        
+        # Manual Transform
+        manual_group = QGroupBox("Manual Transform (Selected Dataset)")
+        manual_form = QFormLayout()
+        
+        self.tx_spin = QDoubleSpinBox()
+        self.ty_spin = QDoubleSpinBox()
+        self.tz_spin = QDoubleSpinBox()
+        for spin in (self.tx_spin, self.ty_spin, self.tz_spin):
+            spin.setRange(-10000.0, 10000.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.1)
+            
+        self.rx_spin = QDoubleSpinBox()
+        self.ry_spin = QDoubleSpinBox()
+        self.rz_spin = QDoubleSpinBox()
+        for spin in (self.rx_spin, self.ry_spin, self.rz_spin):
+            spin.setRange(-180.0, 180.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(1.0)
+            
+        manual_form.addRow("Translate X (units):", self.tx_spin)
+        manual_form.addRow("Translate Y (units):", self.ty_spin)
+        manual_form.addRow("Translate Z (units):", self.tz_spin)
+        manual_form.addRow("Rotate X (deg):", self.rx_spin)
+        manual_form.addRow("Rotate Y (deg):", self.ry_spin)
+        manual_form.addRow("Rotate Z (deg):", self.rz_spin)
+        
+        # Invert axis options
         invert_layout = QHBoxLayout()
         self.invert_x_check = QCheckBox("Invert X")
         self.invert_y_check = QCheckBox("Invert Y")
         self.invert_z_check = QCheckBox("Invert Z")
-        self.invert_x_check.stateChanged.connect(self._on_settings_changed)
-        self.invert_y_check.stateChanged.connect(self._on_settings_changed)
-        self.invert_z_check.stateChanged.connect(self._on_settings_changed)
+        # Apply is now done via button instead of stateChanged
         invert_layout.addWidget(self.invert_x_check)
         invert_layout.addWidget(self.invert_y_check)
         invert_layout.addWidget(self.invert_z_check)
-        settings_layout.addLayout(invert_layout)
+        manual_form.addRow("Invert Axis:", invert_layout)
         
-        self.btn_save_data = QPushButton("Save Filtered Data")
-        self.btn_save_data.clicked.connect(self.save_data_requested.emit)
-        settings_layout.addWidget(self.btn_save_data)
+        self.btn_apply_transform = QPushButton("Apply Transform")
+        self.btn_apply_transform.clicked.connect(self._on_settings_changed)
+        manual_form.addRow("", self.btn_apply_transform)
         
-        self.settings_group.setLayout(settings_layout)
-        self.settings_group.setEnabled(False) # Disabled until selection made
-        layout.addWidget(self.settings_group)
+        manual_group.setLayout(manual_form)
+        transform_layout.addWidget(manual_group)
         
-        # --- Export ---
-        export_group = QGroupBox("Export")
-        export_layout = QVBoxLayout()
-        self.btn_export = QPushButton("Export Plot")
-        self.btn_export.clicked.connect(self._on_export_clicked)
-        export_layout.addWidget(self.btn_export)
-        export_group.setLayout(export_layout)
-        layout.addWidget(export_group)
+        # ICP Group
+        icp_group = QGroupBox("ICP Alignment")
+        icp_layout = QFormLayout()
+        self.icp_target_combo = QComboBox()
+        self.icp_distance_spin = QDoubleSpinBox()
+        self.icp_distance_spin.setRange(0.001, 10000.0)
+        self.icp_distance_spin.setValue(1.0)
+        self.icp_distance_spin.setDecimals(3)
+        self.icp_distance_spin.setToolTip("Maximum distance between points to be considered a match. If your clouds are roughly aligned, keep this small.")
         
-        layout.addStretch()
+        self.btn_run_icp = QPushButton("Run ICP (Selected -> Target)")
+        self.btn_run_icp.clicked.connect(self._on_run_icp_clicked)
+        
+        icp_layout.addRow("Target (Reference):", self.icp_target_combo)
+        icp_layout.addRow("Max Distance:", self.icp_distance_spin)
+        icp_layout.addRow("", self.btn_run_icp)
+        icp_group.setLayout(icp_layout)
+        transform_layout.addWidget(icp_group)
+        
+        transform_layout.addStretch()
+        tab_transform.setLayout(transform_layout)
+        
+        self.tabs.addTab(tab_data, "Data & Display")
+        self.tabs.addTab(tab_filter, "Filtering")
+        self.tabs.addTab(tab_transform, "Transform & Align")
+        
+        layout.addWidget(self.tabs)
         self.setLayout(layout)
         
+        # Group parts that require selection
+        self.requires_selection_widgets = [
+            colors_group, voxel_group, outlier_group,
+            self.btn_save_data, manual_group, icp_group
+        ]
+        self._enable_selection_widgets(False)
+        
+    def _enable_selection_widgets(self, enable: bool):
+        for w in self.requires_selection_widgets:
+            w.setEnabled(enable)
+            
     def add_dataset_to_list(self, name: str, checked: bool = True):
         item = QListWidgetItem(name)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -190,12 +269,16 @@ class ControlPanel(QWidget):
         self.dataset_list.addItem(item)
         self.dataset_list.setCurrentItem(item)
         
+        # Update target combo
+        self.icp_target_combo.addItem(name)
+        
     def remove_dataset_from_list(self, idx: int):
         self.dataset_list.takeItem(idx)
+        self.icp_target_combo.removeItem(idx)
         
     def _on_selection_changed(self):
         idx = self.dataset_list.currentRow()
-        self.settings_group.setEnabled(idx >= 0)
+        self._enable_selection_widgets(idx >= 0)
         if idx >= 0:
             self.selection_changed.emit(idx)
         
@@ -212,14 +295,18 @@ class ControlPanel(QWidget):
     def _on_settings_changed(self):
         if self.signalsBlocked():
             return
-        self.stride_label.setText(f"Stride (keep 1 in N): {self.stride_slider.value()}")
-        self.rand_label.setText(f"Random Sample %: {self.rand_slider.value()}")
         self.settings_changed.emit()
         
     def _on_export_clicked(self):
         filepath, _ = QFileDialog.getSaveFileName(self, "Export Plot", "", "PNG Image (*.png);;JPEG Image (*.jpg);;SVG Vector (*.svg)")
         if filepath:
             self.export_requested.emit(filepath)
+            
+    def _on_run_icp_clicked(self):
+        source_idx = self.dataset_list.currentRow()
+        target_idx = self.icp_target_combo.currentIndex()
+        if source_idx >= 0 and target_idx >= 0 and source_idx != target_idx:
+            self.run_icp_requested.emit(source_idx, target_idx, self.icp_distance_spin.value())
             
     def update_columns(self, columns: list):
         self.color_combo.blockSignals(True)
@@ -231,42 +318,21 @@ class ControlPanel(QWidget):
         
     def apply_config(self, config: dict):
         self.blockSignals(True)
-        self.stride_slider.blockSignals(True)
-        self.rand_slider.blockSignals(True)
-        self.base_color_combo.blockSignals(True)
-        self.color_combo.blockSignals(True)
-        self.invert_x_check.blockSignals(True)
-        self.invert_y_check.blockSignals(True)
-        self.invert_z_check.blockSignals(True)
         
-        self.zscore_check.blockSignals(True)
-        self.zscore_spin.blockSignals(True)
-        self.sor_check.blockSignals(True)
-        self.sor_k_spin.blockSignals(True)
-        self.sor_std_spin.blockSignals(True)
-        self.bbox_check.blockSignals(True)
-        self.bbox_zmin.blockSignals(True)
-        self.bbox_zmax.blockSignals(True)
-        
-        if "stride" in config:
-            val = config["stride"]
-            self.stride_slider.setValue(val)
-            self.stride_label.setText(f"Stride (keep 1 in N): {val}")
-            
-        if "rand_pct" in config:
-            val = int(config["rand_pct"] * 100)
-            self.rand_slider.setValue(val)
-            self.rand_label.setText(f"Random Sample %: {val}")
+        # Block sub-signals
+        for w in [self.base_color_combo, self.color_combo,
+                  self.invert_x_check, self.invert_y_check, self.invert_z_check,
+                  self.zscore_check, self.zscore_spin, self.sor_check, self.sor_k_spin, self.sor_std_spin,
+                  self.bbox_check, self.bbox_zmin, self.bbox_zmax, self.voxel_check, self.voxel_spin,
+                  self.tx_spin, self.ty_spin, self.tz_spin, self.rx_spin, self.ry_spin, self.rz_spin]:
+            w.blockSignals(True)
             
         if "base_color" in config and config["base_color"]:
             idx = self.base_color_combo.findText(config["base_color"])
-            if idx >= 0:
-                self.base_color_combo.setCurrentIndex(idx)
-                
+            if idx >= 0: self.base_color_combo.setCurrentIndex(idx)
         if "color_col" in config and config["color_col"]:
             idx = self.color_combo.findText(config["color_col"])
-            if idx >= 0:
-                self.color_combo.setCurrentIndex(idx)
+            if idx >= 0: self.color_combo.setCurrentIndex(idx)
         else:
             self.color_combo.setCurrentIndex(0)
             
@@ -282,28 +348,29 @@ class ControlPanel(QWidget):
         self.bbox_check.setChecked(config.get("bbox_enabled", False))
         self.bbox_zmin.setValue(config.get("bbox_zmin", -1000.0))
         self.bbox_zmax.setValue(config.get("bbox_zmax", 1000.0))
+        
+        self.voxel_check.setChecked(config.get("voxel_enabled", False))
+        self.voxel_spin.setValue(config.get("voxel_size", 0.1))
+        
+        self.tx_spin.setValue(config.get("tx", 0.0))
+        self.ty_spin.setValue(config.get("ty", 0.0))
+        self.tz_spin.setValue(config.get("tz", 0.0))
+        self.rx_spin.setValue(config.get("rx", 0.0))
+        self.ry_spin.setValue(config.get("ry", 0.0))
+        self.rz_spin.setValue(config.get("rz", 0.0))
+        
+        # Unblock sub-signals
+        for w in [self.base_color_combo, self.color_combo,
+                  self.invert_x_check, self.invert_y_check, self.invert_z_check,
+                  self.zscore_check, self.zscore_spin, self.sor_check, self.sor_k_spin, self.sor_std_spin,
+                  self.bbox_check, self.bbox_zmin, self.bbox_zmax, self.voxel_check, self.voxel_spin,
+                  self.tx_spin, self.ty_spin, self.tz_spin, self.rx_spin, self.ry_spin, self.rz_spin]:
+            w.blockSignals(False)
             
-        self.stride_slider.blockSignals(False)
-        self.rand_slider.blockSignals(False)
-        self.base_color_combo.blockSignals(False)
-        self.color_combo.blockSignals(False)
-        self.invert_x_check.blockSignals(False)
-        self.invert_y_check.blockSignals(False)
-        self.invert_z_check.blockSignals(False)
-        self.zscore_check.blockSignals(False)
-        self.zscore_spin.blockSignals(False)
-        self.sor_check.blockSignals(False)
-        self.sor_k_spin.blockSignals(False)
-        self.sor_std_spin.blockSignals(False)
-        self.bbox_check.blockSignals(False)
-        self.bbox_zmin.blockSignals(False)
-        self.bbox_zmax.blockSignals(False)
         self.blockSignals(False)
         
     def get_current_settings(self) -> dict:
         return {
-            "stride": self.stride_slider.value(),
-            "rand_pct": self.rand_slider.value() / 100.0,
             "base_color": self.base_color_combo.currentText(),
             "color_col": self.color_combo.currentText() if self.color_combo.currentText() != "None" else None,
             "invert_x": self.invert_x_check.isChecked(),
@@ -316,5 +383,13 @@ class ControlPanel(QWidget):
             "sor_std": self.sor_std_spin.value(),
             "bbox_enabled": self.bbox_check.isChecked(),
             "bbox_zmin": self.bbox_zmin.value(),
-            "bbox_zmax": self.bbox_zmax.value()
+            "bbox_zmax": self.bbox_zmax.value(),
+            "voxel_enabled": self.voxel_check.isChecked(),
+            "voxel_size": self.voxel_spin.value(),
+            "tx": self.tx_spin.value(),
+            "ty": self.ty_spin.value(),
+            "tz": self.tz_spin.value(),
+            "rx": self.rx_spin.value(),
+            "ry": self.ry_spin.value(),
+            "rz": self.rz_spin.value()
         }
