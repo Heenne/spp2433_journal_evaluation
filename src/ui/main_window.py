@@ -3,8 +3,9 @@ import pandas as pd
 import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
-    QMessageBox, QMenuBar, QMenu, QApplication, QProgressBar, QPushButton
+    QMessageBox, QMenuBar, QMenu, QApplication, QProgressBar, QPushButton, QSplitter
 )
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from src.ui.plot_canvas import PlotCanvas
 from src.ui.control_panel import ControlPanel
@@ -14,7 +15,10 @@ from src.data.filter import (
     save_filtered_data, load_filter_config, save_filter_config,
     filter_by_zscore, filter_by_bounding_box, filter_by_sor, filter_by_voxel_grid
 )
-from src.utils.registration import run_icp, euler_translation_to_matrix
+from src.utils.registration import (
+    run_icp, automatic_registration, global_automatic_registration, calculate_cloud_error,
+    euler_translation_to_matrix, matrix_to_euler_translation,
+)
 from src.utils.worker import WorkerThread
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 
@@ -77,6 +81,9 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.btn_cancel)
         
         layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         
         # Control Panel
         self.control_panel = ControlPanel()
@@ -89,6 +96,10 @@ class MainWindow(QMainWindow):
         self.control_panel.export_requested.connect(self.export_plot)
         self.control_panel.save_data_requested.connect(self.save_filtered_dataset)
         self.control_panel.run_icp_requested.connect(self.on_run_icp)
+        self.control_panel.run_legacy_global_alignment_requested.connect(self.on_run_legacy_global_alignment)
+        self.control_panel.run_auto_alignment_requested.connect(self.on_run_auto_alignment)
+        self.control_panel.calculate_error_requested.connect(self.on_calculate_error)
+        self.control_panel.error_map_display_changed.connect(self.on_error_map_display_changed)
         
         # Plot Canvas
         plot_layout = QVBoxLayout()
@@ -101,8 +112,12 @@ class MainWindow(QMainWindow):
         plot_widget = QWidget()
         plot_widget.setLayout(plot_layout)
         
-        layout.addWidget(self.control_panel, 1) # proportion 1
-        layout.addWidget(plot_widget, 3) # proportion 3
+        splitter.addWidget(self.control_panel)
+        splitter.addWidget(plot_widget)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        
+        layout.addWidget(splitter)
         
         central_widget.setLayout(layout)
         
@@ -130,6 +145,12 @@ class MainWindow(QMainWindow):
             self.update_worker.cancel()
         if hasattr(self, 'icp_worker') and self.icp_worker.isRunning():
             self.icp_worker.cancel()
+        if hasattr(self, 'legacy_global_alignment_worker') and self.legacy_global_alignment_worker.isRunning():
+            self.legacy_global_alignment_worker.cancel()
+        if hasattr(self, 'auto_alignment_worker') and self.auto_alignment_worker.isRunning():
+            self.auto_alignment_worker.cancel()
+        if hasattr(self, 'comparison_worker') and self.comparison_worker.isRunning():
+            self.comparison_worker.cancel()
         if hasattr(self, 'save_worker') and self.save_worker.isRunning():
             self.save_worker.cancel()
         self.statusBar().showMessage("Cancelling... (Waiting for worker to abort)")
@@ -199,24 +220,23 @@ class MainWindow(QMainWindow):
         )
         
         if filepaths:
-            filepath = filepaths[0]
-            
-            cached_files = check_cached_filtered_files(filepath)
-            if cached_files:
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Icon.Question)
-                msg.setWindowTitle("Cached Data Found")
-                msg.setText("Filtered versions of this dataset exist. Load a cached version?")
-                msg.setInformativeText("This can be much faster for large files.")
+            for filepath in filepaths:
+                cached_files = check_cached_filtered_files(filepath)
+                if cached_files:
+                    msg = QMessageBox()
+                    msg.setIcon(QMessageBox.Icon.Question)
+                    msg.setWindowTitle("Cached Data Found")
+                    msg.setText(f"Filtered versions of {os.path.basename(filepath)} exist. Load a cached version?")
+                    msg.setInformativeText("This can be much faster for large files.")
+                    
+                    btn_yes = msg.addButton("Yes, load cached", QMessageBox.ButtonRole.YesRole)
+                    btn_no = msg.addButton("No, load original", QMessageBox.ButtonRole.NoRole)
+                    msg.exec()
+                    
+                    if msg.clickedButton() == btn_yes:
+                        filepath = cached_files[0]
                 
-                btn_yes = msg.addButton("Yes, load cached", QMessageBox.ButtonRole.YesRole)
-                btn_no = msg.addButton("No, load original", QMessageBox.ButtonRole.NoRole)
-                msg.exec()
-                
-                if msg.clickedButton() == btn_yes:
-                    filepath = cached_files[0]
-            
-            self.load_file(filepath)
+                self.load_file(filepath)
             
     def update_recent_projects_menu(self):
         self.recent_menu.clear()
@@ -313,18 +333,31 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Project Save Error", f"Failed to save project:\n{str(e)}")
             
     def load_file(self, filepath: str):
+        if not hasattr(self, 'load_queue'):
+            self.load_queue = []
+        self.load_queue.append(filepath)
+        self.process_load_queue()
+
+    def process_load_queue(self):
         if hasattr(self, 'load_worker') and self.load_worker.isRunning():
             return
             
-        self.set_loading_state(True, f"Loading {filepath}...")
+        if not hasattr(self, 'load_queue') or not self.load_queue:
+            return
+            
+        filepath = self.load_queue.pop(0)
+        self.set_loading_state(True, f"Loading {os.path.basename(filepath)}...")
         
         self.load_worker = WorkerThread(parse_point_cloud_file, filepath)
         
         def on_finished(result):
             df, add_cols, err = result
             if err:
-                self.set_loading_state(False, "Error loading file.")
                 QMessageBox.critical(self, "Error", err)
+                if self.load_queue:
+                    self.process_load_queue()
+                else:
+                    self.set_loading_state(False, "Error loading file.")
                 return
                 
             name = os.path.basename(filepath)
@@ -352,6 +385,7 @@ class MainWindow(QMainWindow):
                     "sor_enabled": False, "sor_k": 50, "sor_std": 1.0,
                     "bbox_enabled": False, "bbox_zmin": -1000.0, "bbox_zmax": 1000.0,
                     "voxel_enabled": False, "voxel_size": auto_voxel_size,
+                    "scale": 1.0,
                     "tx": 0.0, "ty": 0.0, "tz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0
                 }
                 if len(df) > 100000:
@@ -359,7 +393,7 @@ class MainWindow(QMainWindow):
                     QMessageBox.information(
                         self, 
                         "Auto-Filter Activated", 
-                        f"This dataset has {len(df):,} points which could cause lag.\n\n"
+                        f"Dataset {name} has {len(df):,} points which could cause lag.\n\n"
                         f"A Voxel Downsample filter has been automatically enabled with a size of {auto_voxel_size:.3f} units."
                     )
                         
@@ -374,12 +408,19 @@ class MainWindow(QMainWindow):
             
             self.datasets.append(dataset)
             self.control_panel.add_dataset_to_list(name, checked=True)
-            self.set_loading_state(False)
-            self.update_plot()
+            
+            if self.load_queue:
+                self.process_load_queue()
+            else:
+                self.set_loading_state(False)
+                self.update_plot()
             
         def on_error(err_str):
-            self.set_loading_state(False, "Error loading file.")
             QMessageBox.critical(self, "Error", f"Failed to load file: {err_str}")
+            if self.load_queue:
+                self.process_load_queue()
+            else:
+                self.set_loading_state(False, "Error loading file.")
             
         self.load_worker.finished.connect(on_finished)
         self.load_worker.error.connect(on_error)
@@ -396,6 +437,10 @@ class MainWindow(QMainWindow):
             dataset = self.datasets[idx]
             self.control_panel.update_columns(dataset["add_cols"])
             self.control_panel.apply_config(dataset["settings"])
+            self.control_panel.set_error_map_display_state(
+                "error_visualization" in dataset,
+                dataset.get("show_error_visualization", False),
+            )
             
     def on_visibility_toggled(self, idx: int, is_visible: bool):
         if 0 <= idx < len(self.datasets):
@@ -405,26 +450,53 @@ class MainWindow(QMainWindow):
     def on_settings_changed(self):
         idx = self.control_panel.dataset_list.currentRow()
         if 0 <= idx < len(self.datasets):
+            # A distance map is valid only for the exact source/reference
+            # transforms and quality filters that were used to calculate it.
+            # Any settings edit can change either cloud, so discard stale maps.
+            for dataset in self.datasets:
+                dataset.pop("error_visualization", None)
+                dataset.pop("show_error_visualization", None)
             st = self.control_panel.get_current_settings()
             self.datasets[idx]["settings"] = st
             save_filter_config(self.datasets[idx]["filepath"], st)
+            self.control_panel.set_error_map_display_state(False)
             self.update_plot()
+
+    def on_error_map_display_changed(self, shown: bool):
+        """Toggle the selected cloud's already calculated error-map rendering."""
+        idx = self.control_panel.dataset_list.currentRow()
+        if not (0 <= idx < len(self.datasets)):
+            return
+        dataset = self.datasets[idx]
+        if "error_visualization" not in dataset:
+            return
+        dataset["show_error_visualization"] = shown
+        self.plot_canvas.plot_datasets(self.datasets)
             
     def apply_transform(self, df: pd.DataFrame, settings: dict) -> pd.DataFrame:
-        """Applies manual translation and rotation to the DataFrame coordinates."""
+        """Apply axis convention, uniform scale, then manual rotation and translation."""
         tx, ty, tz = settings.get("tx", 0.0), settings.get("ty", 0.0), settings.get("tz", 0.0)
         rx, ry, rz = settings.get("rx", 0.0), settings.get("ry", 0.0), settings.get("rz", 0.0)
+        scale = settings.get("scale", 1.0)
         
-        if tx == 0.0 and ty == 0.0 and tz == 0.0 and rx == 0.0 and ry == 0.0 and rz == 0.0:
+        invert_x = settings.get("invert_x", False)
+        invert_y = settings.get("invert_y", False)
+        invert_z = settings.get("invert_z", False)
+        if (scale == 1.0 and tx == 0.0 and ty == 0.0 and tz == 0.0 and rx == 0.0 and ry == 0.0 and rz == 0.0
+                and not invert_x and not invert_y and not invert_z):
             return df
             
         mat = euler_translation_to_matrix(tx, ty, tz, rx, ry, rz)
         
-        points = df[['X', 'Y', 'Z']].values
-        # Apply 4x4 matrix
-        ones = np.ones((points.shape[0], 1))
-        points_4d = np.hstack([points, ones])
-        transformed_points = (mat @ points_4d.T).T[:, :3]
+        points = df[['X', 'Y', 'Z']].to_numpy(dtype=float, copy=True)
+        if invert_x:
+            points[:, 0] *= -1
+        if invert_y:
+            points[:, 1] *= -1
+        if invert_z:
+            points[:, 2] *= -1
+        points *= scale
+        transformed_points = points @ mat[:3, :3].T + mat[:3, 3]
         
         df_out = df.copy()
         df_out['X'] = transformed_points[:, 0]
@@ -436,11 +508,16 @@ class MainWindow(QMainWindow):
         results = []
         for d in datasets:
             if not d["visible"]:
-                results.append((None, d))
+                results.append((None, d, False))
                 continue
                 
             df = d["df"]
             st = d["settings"]
+            
+            # Skip reprocessing if settings are unchanged
+            if d.get("last_settings") == st and "df_filtered" in d:
+                results.append((d["df_filtered"], d, True))
+                continue
             
             df_filtered = self.apply_transform(df, st)
             
@@ -453,7 +530,7 @@ class MainWindow(QMainWindow):
             if st.get("voxel_enabled"):
                 df_filtered = filter_by_voxel_grid(df_filtered, st.get("voxel_size", 0.1))
                 
-            results.append((df_filtered, d))
+            results.append((df_filtered, d, False))
         return results
 
     def update_plot(self):
@@ -465,9 +542,12 @@ class MainWindow(QMainWindow):
         self.update_worker = WorkerThread(self.process_filters_background, self.datasets)
         
         def on_finished(results):
-            for df_filtered, d in results:
+            import copy
+            for df_filtered, d, unchanged in results:
                 if df_filtered is not None:
-                    d["df_filtered"] = df_filtered
+                    if not unchanged:
+                        d["df_filtered"] = df_filtered
+                        d["last_settings"] = copy.deepcopy(d["settings"])
                     
             self.plot_canvas.plot_datasets(self.datasets)
             total_points = sum([len(d["df_filtered"]) for d in self.datasets if d["visible"] and "df_filtered" in d])
@@ -502,6 +582,375 @@ class MainWindow(QMainWindow):
         result, fitness = run_icp(source_df, target_df, max_correspondence_distance=max_corr_dist, method=method, progress_callback=progress_callback, is_cancelled_callback=is_cancelled_callback)
         return result, fitness, source_dataset
 
+    def run_legacy_global_alignment_background(self, source_dataset, target_dataset, max_registration_points,
+                                               progress_callback=None, is_cancelled_callback=None):
+        if progress_callback:
+            progress_callback(
+                "Applying the selected axis inversions, scale, and manual transforms before global alignment..."
+            )
+        source_df = self._apply_quality_filters(source_dataset)
+        target_df = self._apply_quality_filters(target_dataset)
+        result = global_automatic_registration(
+            source_df,
+            target_df,
+            max_registration_points=max_registration_points,
+            progress_callback=progress_callback,
+            is_cancelled_callback=is_cancelled_callback,
+        )
+        return result, source_dataset, target_dataset
+
+    def _apply_quality_filters(self, dataset):
+        """Apply the user's non-display filters before registration/comparison.
+
+        The interactive voxel setting is deliberately not applied here. The
+        automatic registration chooses its own adaptive voxel size, and the
+        comparison should use the retained measurement density (or its explicit
+        analysis sample limit), rather than the coarse display resolution.
+        """
+        df = self.apply_transform(dataset["df"], dataset["settings"])
+        st = dataset["settings"]
+        if st.get("bbox_enabled"):
+            df = filter_by_bounding_box(df, z_min=st.get("bbox_zmin"), z_max=st.get("bbox_zmax"))
+        if st.get("zscore_enabled"):
+            df = filter_by_zscore(df, st.get("zscore_threshold", 3.0))
+        if st.get("sor_enabled"):
+            df = filter_by_sor(df, st.get("sor_k", 50), st.get("sor_std", 1.0))
+        return df
+
+    def _save_alignment_transform(self, source_idx, target_dataset, delta_transform, label, details):
+        """Compose an alignment delta with the source's existing manual pose."""
+        source_dataset = self.datasets[source_idx]
+        st = source_dataset["settings"]
+        current_transform = euler_translation_to_matrix(
+            st.get("tx", 0.0), st.get("ty", 0.0), st.get("tz", 0.0),
+            st.get("rx", 0.0), st.get("ry", 0.0), st.get("rz", 0.0),
+        )
+        final_transform = np.asarray(delta_transform) @ current_transform
+        ftx, fty, ftz, frx, fry, frz = matrix_to_euler_translation(final_transform)
+
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        preset_name = f"{label} ({timestamp})"
+        saved = st.get("saved_transforms", {"Initial": {
+            "scale": st.get("scale", 1.0),
+            "tx": st.get("tx", 0.0), "ty": st.get("ty", 0.0), "tz": st.get("tz", 0.0),
+            "rx": st.get("rx", 0.0), "ry": st.get("ry", 0.0), "rz": st.get("rz", 0.0),
+        }})
+        saved[preset_name] = {
+            "scale": st.get("scale", 1.0),
+            "tx": ftx, "ty": fty, "tz": ftz, "rx": frx, "ry": fry, "rz": frz,
+        }
+        st.update({
+            "saved_transforms": saved,
+            "current_transform_name": preset_name,
+            "tx": ftx, "ty": fty, "tz": ftz, "rx": frx, "ry": fry, "rz": frz,
+            "last_registration": {
+                **details,
+                "reference": target_dataset["name"],
+                "preset": preset_name,
+            },
+        })
+        save_filter_config(source_dataset["filepath"], st)
+        if self.control_panel.dataset_list.currentRow() == source_idx:
+            self.control_panel.apply_config(st)
+        return preset_name
+
+    def run_auto_alignment_background(self, source_dataset, target_dataset, max_registration_points,
+                                      translation_x_limit, translation_y_limit, translation_z_limit,
+                                      rotation_x_limit, rotation_y_limit, rotation_z_limit,
+                                      progress_callback=None,
+                                      is_cancelled_callback=None):
+        if progress_callback:
+            progress_callback("Preparing point clouds for bounded manual fine alignment...")
+        source_df = self._apply_quality_filters(source_dataset)
+        target_df = self._apply_quality_filters(target_dataset)
+        result = automatic_registration(
+            source_df,
+            target_df,
+            max_registration_points=max_registration_points,
+            use_global_registration=False,
+            translation_limits=(translation_x_limit, translation_y_limit, translation_z_limit),
+            rotation_limits_degrees=(rotation_x_limit, rotation_y_limit, rotation_z_limit),
+            progress_callback=progress_callback,
+            is_cancelled_callback=is_cancelled_callback,
+        )
+        return result, source_dataset, target_dataset
+
+    def on_run_legacy_global_alignment(self, source_idx: int, target_idx: int, max_registration_points: int):
+        if hasattr(self, 'legacy_global_alignment_worker') and self.legacy_global_alignment_worker.isRunning():
+            return
+        source_dataset = self.datasets[source_idx]
+        target_dataset = self.datasets[target_idx]
+        self.set_loading_state(True, "Running previous global auto alignment with the transformed point clouds...")
+        self.legacy_global_alignment_worker = WorkerThread(
+            self.run_legacy_global_alignment_background,
+            source_dataset,
+            target_dataset,
+            max_registration_points,
+            inject_progress=True,
+            inject_cancelled=True,
+        )
+        self.legacy_global_alignment_worker.progress.connect(lambda msg: self.statusBar().showMessage(msg))
+
+        def on_finished(result):
+            alignment, source, target = result
+            details = {
+                "method": "previous global PCA / centre-of-gravity / FPFH alignment",
+                "initialization": alignment["initialization"],
+                "source_overlap": alignment["source_overlap"],
+                "reference_overlap": alignment["reference_overlap"],
+                "symmetric_overlap": alignment["symmetric_overlap"],
+                "inlier_rmse": alignment["inlier_rmse"],
+                "voxel_size": alignment["voxel_size"],
+                "final_tolerance": alignment["final_tolerance"],
+                "source_registration_points": alignment["source_registration_points"],
+                "target_registration_points": alignment["target_registration_points"],
+                "candidate_count": alignment["candidate_count"],
+                "axis_inversions_applied": True,
+            }
+            preset_name = self._save_alignment_transform(
+                source_idx, target, alignment["transformation"], "Previous Global Align", details
+            )
+            self.control_panel.set_comparison_summary(
+                f"Previous global alignment to {target['name']}: {alignment['source_overlap']:.1%} source overlap, "
+                f"trimmed RMSE {alignment['inlier_rmse']:.6g}."
+            )
+            self.set_loading_state(False)
+            self.update_plot()
+            QMessageBox.information(
+                self,
+                "Previous Global Alignment Complete",
+                f"Saved as preset: '{preset_name}'.\n\n"
+                f"Initialisation selected: {alignment['initialization']}\n"
+                f"Source overlap: {alignment['source_overlap']:.1%}\n"
+                f"Reference overlap: {alignment['reference_overlap']:.1%}\n"
+                f"Symmetric overlap: {alignment['symmetric_overlap']:.1%}\n"
+                f"Trimmed RMSE: {alignment['inlier_rmse']:.6g}\n\n"
+                "The selected Invert X/Y/Z settings were applied to both clouds before this alignment. "
+                "Inspect the overlay before calculating surface error; this restored global method can still select "
+                "a visually similar but wrong blade area.",
+            )
+
+        def on_error(err_str):
+            self.set_loading_state(False)
+            if "Cancelled by User" in err_str:
+                QMessageBox.information(self, "Cancelled", "Previous global alignment was cancelled.")
+            else:
+                QMessageBox.critical(self, "Previous Global Alignment Error", f"Alignment failed:\n{err_str}")
+
+        self.legacy_global_alignment_worker.finished.connect(on_finished)
+        self.legacy_global_alignment_worker.error.connect(on_error)
+        self.legacy_global_alignment_worker.start()
+
+    def on_run_auto_alignment(self, source_idx: int, target_idx: int,
+                              max_registration_points: int,
+                              translation_x_limit: float, translation_y_limit: float, translation_z_limit: float,
+                              rotation_x_limit: float, rotation_y_limit: float, rotation_z_limit: float):
+        if hasattr(self, 'auto_alignment_worker') and self.auto_alignment_worker.isRunning():
+            return
+        source_dataset = self.datasets[source_idx]
+        target_dataset = self.datasets[target_idx]
+        self.set_loading_state(True, "Optimising the manual point-cloud alignment...")
+        self.auto_alignment_worker = WorkerThread(
+            self.run_auto_alignment_background,
+            source_dataset,
+            target_dataset,
+            max_registration_points,
+            translation_x_limit,
+            translation_y_limit,
+            translation_z_limit,
+            rotation_x_limit,
+            rotation_y_limit,
+            rotation_z_limit,
+            inject_progress=True,
+            inject_cancelled=True,
+        )
+        self.auto_alignment_worker.progress.connect(lambda msg: self.statusBar().showMessage(msg))
+
+        def on_finished(result):
+            alignment, source, target = result
+            baseline = alignment["baseline"]
+            optimizer = alignment["optimizer"]
+            baseline_summary = (
+                f"manual anchored overlap {baseline['fitness']:.1%}, "
+                f"trimmed RMSE {baseline['rmse']:.6g}"
+            )
+            final_summary = (
+                f"final anchored overlap {alignment['fitness']:.1%}, "
+                f"trimmed RMSE {alignment['inlier_rmse']:.6g}"
+            )
+            if not optimizer["accepted"]:
+                self.control_panel.set_comparison_summary(
+                    "Manual pose retained: the bounded local optimizer did not provide a safe measurable improvement. "
+                    f"{baseline_summary}."
+                )
+                self.set_loading_state(False)
+                QMessageBox.information(
+                    self,
+                    "Manual Alignment Retained",
+                    "No transform was saved because the optimizer could not improve the manual pose safely.\n\n"
+                    f"Initial: {baseline_summary}\n"
+                    f"Candidate: {final_summary}\n\n"
+                    "The plotted manual pose is unchanged. Reduce the correction limits to match your confidence, "
+                    "or improve the manual placement and try again.",
+                )
+                return
+            details = {
+                "method": "bounded bidirectional closest-point optimizer",
+                "initialization": alignment["initialization"],
+                "fitness": alignment["fitness"],
+                "inlier_rmse": alignment["inlier_rmse"],
+                "voxel_size": alignment["voxel_size"],
+                "source_registration_points": alignment["source_registration_points"],
+                "target_registration_points": alignment["target_registration_points"],
+                "translation_limits": alignment["translation_limits"],
+                "rotation_limits_degrees": alignment["rotation_limits_degrees"],
+                "capture_distance": alignment["capture_distance"],
+                "source_anchor_points": alignment["source_anchor_points"],
+                "reference_anchor_points": alignment["reference_anchor_points"],
+                "baseline": baseline,
+                "optimizer": optimizer,
+            }
+            preset_name = self._save_alignment_transform(
+                source_idx, target, alignment["transformation"], "Fine Align", details
+            )
+            summary = (
+                f"Fine alignment to {target['name']}: {final_summary} (from {baseline_summary})."
+            )
+            self.control_panel.set_comparison_summary(summary)
+            self.set_loading_state(False)
+            self.update_plot()
+            QMessageBox.information(
+                self,
+                "Fine Alignment Complete",
+                f"Saved as preset: '{preset_name}'.\n\n"
+                f"Initial: {baseline_summary}\n"
+                f"Final: {final_summary}\n"
+                f"Anchor points: {alignment['source_anchor_points']:,} source / "
+                f"{alignment['reference_anchor_points']:,} reference\n"
+                f"Translation limits (+/-): ({alignment['translation_limits'][0]:.6g}, "
+                f"{alignment['translation_limits'][1]:.6g}, {alignment['translation_limits'][2]:.6g})\n"
+                f"Rotation limits (+/-): ({alignment['rotation_limits_degrees'][0]:.2f}, "
+                f"{alignment['rotation_limits_degrees'][1]:.2f}, "
+                f"{alignment['rotation_limits_degrees'][2]:.2f}) degrees\n"
+                f"Capture distance: {alignment['capture_distance']:.6g}\n\n"
+                f"Correction at overlap pivot: {optimizer['translation_correction']:.6g} units "
+                f"({optimizer['translation_correction_vector'][0]:.6g}, "
+                f"{optimizer['translation_correction_vector'][1]:.6g}, "
+                f"{optimizer['translation_correction_vector'][2]:.6g}); "
+                f"rotation XYZ ({optimizer['rotation_correction_vector_degrees'][0]:.2f}, "
+                f"{optimizer['rotation_correction_vector_degrees'][1]:.2f}, "
+                f"{optimizer['rotation_correction_vector_degrees'][2]:.2f}) degrees "
+                f"(total {optimizer['rotation_correction_degrees']:.2f} degrees)\n\n"
+                "The result was constrained around the manual pose. Check the plot before calculating surface error.",
+            )
+
+        def on_error(err_str):
+            self.set_loading_state(False)
+            if "Cancelled by User" in err_str:
+                QMessageBox.information(self, "Cancelled", "Manual fine alignment was cancelled.")
+            else:
+                QMessageBox.critical(self, "Fine Alignment Error", f"Manual fine alignment failed:\n{err_str}")
+
+        self.auto_alignment_worker.finished.connect(on_finished)
+        self.auto_alignment_worker.error.connect(on_error)
+        self.auto_alignment_worker.start()
+
+    @staticmethod
+    def _format_error_report(report):
+        overlap = f"{report['overlap_fraction']:.1%} ({report['overlap_points']:,} points)"
+        sampled = "yes" if report["source_points_sampled"] else "no"
+        if report["overlap_points"] == 0:
+            return (
+                f"Overlap: {overlap}\nNo points were within the cutoff of {report['overlap_cutoff']:.6g}. "
+                "Increase the cutoff or inspect the alignment."
+            )
+        return (
+            f"Overlap: {overlap}; outside overlap: {report['non_overlap_points']:,}\n"
+            f"Mean: {report['mean']:.6g}; median: {report['median']:.6g}; "
+            f"RMSE: {report['rmse']:.6g}; P95: {report['p95']:.6g}; max: {report['maximum']:.6g}\n"
+            f"Analysed {report['source_points_analysed']:,} source points (sampled: {sampled}); "
+            f"indexed {report['reference_points_indexed']:,} reference points."
+        )
+
+    def run_comparison_background(self, source_dataset, target_dataset, cutoff, max_analysis_points,
+                                  progress_callback=None, is_cancelled_callback=None):
+        if progress_callback:
+            progress_callback("Preparing point clouds for surface-error calculation...")
+        source_df = self._apply_quality_filters(source_dataset)
+        target_df = self._apply_quality_filters(target_dataset)
+        report, pointwise = calculate_cloud_error(
+            source_df,
+            target_df,
+            max_distance=cutoff,
+            max_analysis_points=max_analysis_points,
+            progress_callback=progress_callback,
+            is_cancelled_callback=is_cancelled_callback,
+            include_pointwise=True,
+        )
+        return report, pointwise, source_dataset, target_dataset
+
+    def on_calculate_error(self, source_idx: int, target_idx: int, cutoff: float, max_analysis_points: int,
+                           show_error_map: bool = True, highlight_above_mean: bool = False):
+        if hasattr(self, 'comparison_worker') and self.comparison_worker.isRunning():
+            return
+        source_dataset = self.datasets[source_idx]
+        target_dataset = self.datasets[target_idx]
+        self.set_loading_state(True, "Calculating surface error to reference...")
+        self.comparison_worker = WorkerThread(
+            self.run_comparison_background,
+            source_dataset,
+            target_dataset,
+            cutoff,
+            max_analysis_points,
+            inject_progress=True,
+            inject_cancelled=True,
+        )
+        self.comparison_worker.progress.connect(lambda msg: self.statusBar().showMessage(msg))
+
+        def on_finished(result):
+            report, pointwise, source, target = result
+            report["source_name"] = source["name"]
+            report["reference_name"] = target["name"]
+            source["last_comparison"] = report
+            for dataset in self.datasets:
+                dataset.pop("error_visualization", None)
+                dataset.pop("show_error_visualization", None)
+            source["error_visualization"] = {
+                **pointwise,
+                "reference_name": target["name"],
+                "cutoff": report["overlap_cutoff"],
+                "mean": report["mean"],
+                "highlight_above_mean": highlight_above_mean,
+            }
+            source["show_error_visualization"] = show_error_map
+            summary = self._format_error_report(report)
+            self.control_panel.set_comparison_summary(summary)
+            self.set_loading_state(False, "Surface-error comparison complete.")
+            self.plot_canvas.plot_datasets(self.datasets)
+            if self.control_panel.dataset_list.currentRow() == source_idx:
+                self.control_panel.set_error_map_display_state(True, show_error_map)
+            QMessageBox.information(
+                self,
+                "Surface Error Report",
+                f"{source['name']} -> {target['name']}\n\n{summary}\n\n"
+                "Errors are unsigned nearest-reference distances in the data coordinate units. "
+                "Points beyond the cutoff are treated as non-overlap and are excluded from the statistics."
+                + (" The plot now shows the analysed source points coloured by this distance; grey means outside the cutoff."
+                   if show_error_map else ""),
+            )
+
+        def on_error(err_str):
+            self.set_loading_state(False)
+            if "Cancelled by User" in err_str:
+                QMessageBox.information(self, "Cancelled", "Surface-error calculation was cancelled.")
+            else:
+                QMessageBox.critical(self, "Surface Error", f"Surface-error calculation failed:\n{err_str}")
+
+        self.comparison_worker.finished.connect(on_finished)
+        self.comparison_worker.error.connect(on_error)
+        self.comparison_worker.start()
+
     def on_run_icp(self, source_idx: int, target_idx: int, max_corr_dist: float, method: str):
         if hasattr(self, 'icp_worker') and self.icp_worker.isRunning():
             return
@@ -529,6 +978,24 @@ class MainWindow(QMainWindow):
                 from src.utils.registration import matrix_to_euler_translation
                 ftx, fty, ftz, frx, fry, frz = matrix_to_euler_translation(mat_final)
                 
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                new_preset_name = f"ICP Result ({timestamp})"
+                
+                saved = st.get("saved_transforms", {"Initial": {
+                    "scale": st.get("scale", 1.0),
+                    "tx": st.get("tx", 0.0), "ty": st.get("ty", 0.0), "tz": st.get("tz", 0.0),
+                    "rx": st.get("rx", 0.0), "ry": st.get("ry", 0.0), "rz": st.get("rz", 0.0)
+                }})
+                
+                saved[new_preset_name] = {
+                    "scale": st.get("scale", 1.0),
+                    "tx": ftx, "ty": fty, "tz": ftz,
+                    "rx": frx, "ry": fry, "rz": frz
+                }
+                
+                st["saved_transforms"] = saved
+                st["current_transform_name"] = new_preset_name
                 st["tx"] = ftx
                 st["ty"] = fty
                 st["tz"] = ftz
@@ -542,7 +1009,7 @@ class MainWindow(QMainWindow):
                     self.control_panel.apply_config(st)
                     
                 self.update_plot()
-                QMessageBox.information(self, "ICP Complete", f"Alignment finished.\nFitness score: {fitness:.4f}")
+                QMessageBox.information(self, "ICP Complete", f"Alignment finished.\nSaved as preset: '{new_preset_name}'.\nFitness score: {fitness:.4f}")
             else:
                 QMessageBox.warning(self, "ICP Failed", "ICP Alignment failed or open3d is missing.")
                 
