@@ -3,7 +3,8 @@ import pandas as pd
 import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
-    QMessageBox, QMenuBar, QMenu, QApplication, QProgressBar, QPushButton, QSplitter
+    QMessageBox, QMenu, QApplication, QProgressBar, QPushButton, QSplitter,
+    QToolBar, QToolButton, QStyle
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
@@ -29,40 +30,64 @@ class MainWindow(QMainWindow):
         self.resize(1100, 750)
         
         self.datasets = []
+        self.project_filepath = None
+        self.project_dirty = False
         
         self.init_ui()
         
     def init_ui(self):
-        # Menu Bar
-        menu_bar = self.menuBar()
-        file_menu = menu_bar.addMenu("File")
-        
-        open_action = QAction("Open File...", self)
-        open_action.triggered.connect(self.open_file_dialog)
-        file_menu.addAction(open_action)
-        
-        open_proj_action = QAction("Open Project...", self)
-        open_proj_action.triggered.connect(self.open_project_dialog)
-        file_menu.addAction(open_proj_action)
-        
-        save_proj_action = QAction("Save Project...", self)
-        save_proj_action.triggered.connect(self.save_project_dialog)
-        file_menu.addAction(save_proj_action)
-        
-        self.recent_menu = file_menu.addMenu("Recent Projects")
+        # Main app actions live in an icon toolbar rather than a traditional
+        # menu bar. Text remains available through tooltips and accessible
+        # action names.
+        self.menuBar().hide()
+        self.app_toolbar = QToolBar("Project", self)
+        self.app_toolbar.setMovable(False)
+        self.app_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.app_toolbar)
+
+        def toolbar_action(icon, text, callback, shortcut=None):
+            action = QAction(icon, text, self)
+            action.setToolTip(text)
+            action.setStatusTip(text)
+            if shortcut:
+                action.setShortcut(shortcut)
+            action.triggered.connect(callback)
+            self.app_toolbar.addAction(action)
+            return action
+
+        style = self.style()
+        self.open_data_action = toolbar_action(
+            style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "Open point cloud…", self.open_file_dialog,
+            "Ctrl+O",
+        )
+        self.open_project_action = toolbar_action(
+            style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), "Open project…", self.open_project_dialog,
+            "Ctrl+Shift+O",
+        )
+        self.save_project_action = toolbar_action(
+            style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Save project", self.save_project,
+            "Ctrl+S",
+        )
+        self.save_as_project_action = toolbar_action(
+            style.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder), "Save project as…",
+            self.save_project_as_dialog, "Ctrl+Shift+S",
+        )
+        self.app_toolbar.addSeparator()
+        toolbar_action(
+            style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "Convert TXT to CSV…", self.open_convert_dialog
+        )
+        toolbar_action(
+            style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon), "Select quick reference file…",
+            self.select_quick_reference,
+        )
+        self.recent_projects_button = QToolButton(self)
+        self.recent_projects_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self.recent_projects_button.setToolTip("Recent projects")
+        self.recent_projects_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.recent_projects_menu = QMenu(self.recent_projects_button)
+        self.recent_projects_button.setMenu(self.recent_projects_menu)
+        self.app_toolbar.addWidget(self.recent_projects_button)
         self.update_recent_projects_menu()
-        
-        # Tools Menu
-        tools_menu = menu_bar.addMenu("Tools")
-        convert_action = QAction("Convert TXT to CSV...", self)
-        convert_action.triggered.connect(self.open_convert_dialog)
-        tools_menu.addAction(convert_action)
-        
-        # Settings Menu
-        settings_menu = menu_bar.addMenu("Settings")
-        set_ref_action = QAction("Select Quick Reference File...", self)
-        set_ref_action.triggered.connect(self.select_quick_reference)
-        settings_menu.addAction(set_ref_action)
         
         # Central Widget
         central_widget = QWidget()
@@ -90,6 +115,7 @@ class MainWindow(QMainWindow):
         self.control_panel.add_dataset_requested.connect(self.open_file_dialog)
         self.control_panel.add_quick_ref_requested.connect(self.add_quick_reference)
         self.control_panel.remove_dataset_requested.connect(self.remove_dataset)
+        self.control_panel.move_dataset_requested.connect(self.move_dataset)
         self.control_panel.selection_changed.connect(self.on_selection_changed)
         self.control_panel.visibility_toggled.connect(self.on_visibility_toggled)
         self.control_panel.settings_changed.connect(self.on_settings_changed)
@@ -100,6 +126,9 @@ class MainWindow(QMainWindow):
         self.control_panel.run_auto_alignment_requested.connect(self.on_run_auto_alignment)
         self.control_panel.calculate_error_requested.connect(self.on_calculate_error)
         self.control_panel.error_map_display_changed.connect(self.on_error_map_display_changed)
+        self.control_panel.error_map_colour_mode_changed.connect(self.on_error_map_colour_mode_changed)
+        self.control_panel.camera_view_requested.connect(self.on_camera_view_requested)
+        self.control_panel.camera_rotate_requested.connect(self.on_camera_rotate_requested)
         
         # Plot Canvas
         plot_layout = QVBoxLayout()
@@ -120,6 +149,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter)
         
         central_widget.setLayout(layout)
+
+    def set_project_dirty(self, dirty: bool = True):
+        """Track project-owned changes and expose them in the window title."""
+        self.project_dirty = bool(dirty)
+        suffix = os.path.basename(self.project_filepath) if self.project_filepath else "Untitled project"
+        marker = " *" if self.project_dirty else ""
+        self.setWindowTitle(f"3D Point Cloud Data Viewer — {suffix}{marker}")
         
     def set_loading_state(self, is_loading: bool, message: str = ""):
         from PyQt6.QtCore import Qt
@@ -129,13 +165,13 @@ class MainWindow(QMainWindow):
             self.btn_cancel.show()
             self.statusBar().showMessage(message)
             self.control_panel.setEnabled(False)
-            self.menuBar().setEnabled(False)
+            self.app_toolbar.setEnabled(False)
         else:
             QApplication.restoreOverrideCursor()
             self.progress_bar.hide()
             self.btn_cancel.hide()
             self.control_panel.setEnabled(True)
-            self.menuBar().setEnabled(True)
+            self.app_toolbar.setEnabled(True)
             self.statusBar().showMessage(message if message else "Ready.")
             
     def cancel_workers(self):
@@ -239,7 +275,7 @@ class MainWindow(QMainWindow):
                 self.load_file(filepath)
             
     def update_recent_projects_menu(self):
-        self.recent_menu.clear()
+        self.recent_projects_menu.clear()
         from src.utils.app_settings import load_app_settings
         settings = load_app_settings()
         recent = settings.get("recent_projects", [])
@@ -247,7 +283,7 @@ class MainWindow(QMainWindow):
         if not recent:
             empty_action = QAction("No recent projects", self)
             empty_action.setEnabled(False)
-            self.recent_menu.addAction(empty_action)
+            self.recent_projects_menu.addAction(empty_action)
             return
             
         for fp in recent:
@@ -255,7 +291,7 @@ class MainWindow(QMainWindow):
                 action = QAction(os.path.basename(fp), self)
                 action.setToolTip(fp)
                 action.triggered.connect(lambda checked, path=fp: self.open_specific_project(path))
-                self.recent_menu.addAction(action)
+                self.recent_projects_menu.addAction(action)
 
     def add_recent_project(self, filepath: str):
         from src.utils.app_settings import load_app_settings, save_app_settings
@@ -291,17 +327,33 @@ class MainWindow(QMainWindow):
             with open(filepath, 'r') as f:
                 data = json.load(f)
             
-            # Clear existing datasets
+            entries = data.get("datasets", [])
+            # Older project files stored a plain list of paths. New project
+            # files also preserve visibility alongside every path.
+            normalized_entries = []
+            for entry in entries:
+                if isinstance(entry, str):
+                    normalized_entries.append({"filepath": entry, "visible": True})
+                elif isinstance(entry, dict) and entry.get("filepath"):
+                    normalized_entries.append({
+                        "filepath": entry["filepath"],
+                        "visible": bool(entry.get("visible", True)),
+                    })
+
+            # Clear existing datasets.
             for i in range(len(self.datasets) - 1, -1, -1):
                 self.remove_dataset(i)
             
             # Load all files in the project
-            for fp in data.get("datasets", []):
+            for entry in normalized_entries:
+                fp = entry["filepath"]
                 if os.path.exists(fp):
-                    self.load_file(fp)
+                    self.load_file(fp, visible=entry["visible"], mark_project_dirty=False)
                 else:
                     QMessageBox.warning(self, "Missing File", f"Could not find dataset file:\n{fp}")
                     
+            self.project_filepath = filepath
+            self.set_project_dirty(False)
             self.statusBar().showMessage(f"Loaded project: {filepath}")
             self.add_recent_project(filepath)
         except Exception as e:
@@ -314,28 +366,58 @@ class MainWindow(QMainWindow):
         if filepath:
             self.open_specific_project(filepath)
 
-    def save_project_dialog(self):
+    def _project_data(self):
+        """Serialize project-owned state, including layer order and visibility."""
+        return {
+            "format_version": 2,
+            "datasets": [
+                {"filepath": dataset["filepath"], "visible": bool(dataset.get("visible", True))}
+                for dataset in self.datasets
+            ],
+        }
+
+    def _save_project_to_file(self, filepath: str) -> bool:
+        try:
+            import json
+            with open(filepath, 'w') as f:
+                json.dump(self._project_data(), f, indent=4)
+            self.project_filepath = filepath
+            self.set_project_dirty(False)
+            self.statusBar().showMessage(f"Project saved to {filepath}")
+            self.add_recent_project(filepath)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Project Save Error", f"Failed to save project:\n{str(e)}")
+            return False
+
+    def save_project(self) -> bool:
+        """Save in place, or request a path when this is an unsaved project."""
+        if self.project_filepath:
+            return self._save_project_to_file(self.project_filepath)
+        return self.save_project_as_dialog()
+
+    def save_project_as_dialog(self) -> bool:
         filepath, _ = QFileDialog.getSaveFileName(
             self, "Save Project", "", "Project Files (*.json)"
         )
-        if filepath:
-            try:
-                import json
-                data = {
-                    "datasets": [d["filepath"] for d in self.datasets]
-                }
-                with open(filepath, 'w') as f:
-                    json.dump(data, f, indent=4)
-                self.statusBar().showMessage(f"Project saved to {filepath}")
-                self.add_recent_project(filepath)
-                QMessageBox.information(self, "Success", "Project saved successfully.")
-            except Exception as e:
-                QMessageBox.critical(self, "Project Save Error", f"Failed to save project:\n{str(e)}")
+        if not filepath:
+            return False
+        if not filepath.lower().endswith(".json"):
+            filepath += ".json"
+        return self._save_project_to_file(filepath)
+
+    # Kept for callers from earlier versions of the UI.
+    def save_project_dialog(self):
+        return self.save_project_as_dialog()
             
-    def load_file(self, filepath: str):
+    def load_file(self, filepath: str, visible: bool = True, mark_project_dirty: bool = True):
         if not hasattr(self, 'load_queue'):
             self.load_queue = []
-        self.load_queue.append(filepath)
+        self.load_queue.append({
+            "filepath": filepath,
+            "visible": bool(visible),
+            "mark_project_dirty": bool(mark_project_dirty),
+        })
         self.process_load_queue()
 
     def process_load_queue(self):
@@ -345,7 +427,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'load_queue') or not self.load_queue:
             return
             
-        filepath = self.load_queue.pop(0)
+        load_request = self.load_queue.pop(0)
+        filepath = load_request["filepath"]
         self.set_loading_state(True, f"Loading {os.path.basename(filepath)}...")
         
         self.load_worker = WorkerThread(parse_point_cloud_file, filepath)
@@ -402,12 +485,14 @@ class MainWindow(QMainWindow):
                 "name": name,
                 "df": df,
                 "settings": config,
-                "visible": True,
+                "visible": load_request["visible"],
                 "add_cols": add_cols
             }
             
             self.datasets.append(dataset)
-            self.control_panel.add_dataset_to_list(name, checked=True)
+            self.control_panel.add_dataset_to_list(name, checked=load_request["visible"])
+            if load_request["mark_project_dirty"]:
+                self.set_project_dirty(True)
             
             if self.load_queue:
                 self.process_load_queue()
@@ -430,7 +515,18 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(self.datasets):
             del self.datasets[idx]
             self.control_panel.remove_dataset_from_list(idx)
+            self.set_project_dirty(True)
             self.update_plot()
+
+    def move_dataset(self, old_idx: int, new_idx: int):
+        """Reorder data and selectors; the first list entry is the top render layer."""
+        if not (0 <= old_idx < len(self.datasets) and 0 <= new_idx < len(self.datasets)):
+            return
+        dataset = self.datasets.pop(old_idx)
+        self.datasets.insert(new_idx, dataset)
+        self.control_panel.move_dataset_in_list(old_idx, new_idx)
+        self.set_project_dirty(True)
+        self.update_plot()
             
     def on_selection_changed(self, idx: int):
         if 0 <= idx < len(self.datasets):
@@ -440,11 +536,13 @@ class MainWindow(QMainWindow):
             self.control_panel.set_error_map_display_state(
                 "error_visualization" in dataset,
                 dataset.get("show_error_visualization", False),
+                dataset.get("error_visualization", {}).get("colour_mode", "closest_distance"),
             )
             
     def on_visibility_toggled(self, idx: int, is_visible: bool):
         if 0 <= idx < len(self.datasets):
             self.datasets[idx]["visible"] = is_visible
+            self.set_project_dirty(True)
             self.update_plot()
             
     def on_settings_changed(self):
@@ -459,6 +557,7 @@ class MainWindow(QMainWindow):
             st = self.control_panel.get_current_settings()
             self.datasets[idx]["settings"] = st
             save_filter_config(self.datasets[idx]["filepath"], st)
+            self.set_project_dirty(True)
             self.control_panel.set_error_map_display_state(False)
             self.update_plot()
 
@@ -472,6 +571,24 @@ class MainWindow(QMainWindow):
             return
         dataset["show_error_visualization"] = shown
         self.plot_canvas.plot_datasets(self.datasets)
+
+    def on_error_map_colour_mode_changed(self, colour_mode: str):
+        """Switch between absolute nearest-reference error and mean-centred display."""
+        idx = self.control_panel.dataset_list.currentRow()
+        if not (0 <= idx < len(self.datasets)):
+            return
+        error_map = self.datasets[idx].get("error_visualization")
+        if error_map is None:
+            return
+        error_map["colour_mode"] = colour_mode
+        if self.datasets[idx].get("show_error_visualization", False):
+            self.plot_canvas.plot_datasets(self.datasets)
+
+    def on_camera_view_requested(self, view_name: str):
+        self.plot_canvas.set_standard_view(view_name)
+
+    def on_camera_rotate_requested(self, degrees: float):
+        self.plot_canvas.rotate_camera_around_vertical(float(degrees))
             
     def apply_transform(self, df: pd.DataFrame, settings: dict) -> pd.DataFrame:
         """Apply axis convention, uniform scale, then manual rotation and translation."""
@@ -651,6 +768,7 @@ class MainWindow(QMainWindow):
             },
         })
         save_filter_config(source_dataset["filepath"], st)
+        self.set_project_dirty(True)
         if self.control_panel.dataset_list.currentRow() == source_idx:
             self.control_panel.apply_config(st)
         return preset_name
@@ -922,6 +1040,7 @@ class MainWindow(QMainWindow):
                 "cutoff": report["overlap_cutoff"],
                 "mean": report["mean"],
                 "highlight_above_mean": highlight_above_mean,
+                "colour_mode": "closest_distance",
             }
             source["show_error_visualization"] = show_error_map
             summary = self._format_error_report(report)
@@ -929,7 +1048,7 @@ class MainWindow(QMainWindow):
             self.set_loading_state(False, "Surface-error comparison complete.")
             self.plot_canvas.plot_datasets(self.datasets)
             if self.control_panel.dataset_list.currentRow() == source_idx:
-                self.control_panel.set_error_map_display_state(True, show_error_map)
+                self.control_panel.set_error_map_display_state(True, show_error_map, "closest_distance")
             QMessageBox.information(
                 self,
                 "Surface Error Report",
@@ -1004,6 +1123,7 @@ class MainWindow(QMainWindow):
                 st["rz"] = frz
                 
                 save_filter_config(s_dataset["filepath"], st)
+                self.set_project_dirty(True)
                 
                 if self.control_panel.dataset_list.currentRow() == source_idx:
                     self.control_panel.apply_config(st)
@@ -1072,3 +1192,31 @@ class MainWindow(QMainWindow):
         self.save_worker.finished.connect(on_finished)
         self.save_worker.error.connect(on_error)
         self.save_worker.start()
+
+    def closeEvent(self, event):
+        """Offer Save / Discard / Cancel when project-owned state changed."""
+        if not self.project_dirty:
+            event.accept()
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Unsaved Project Changes")
+        dialog.setText("The project has unsaved changes.")
+        dialog.setInformativeText("Save before closing?")
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Save)
+        choice = dialog.exec()
+        if choice == QMessageBox.StandardButton.Save:
+            if self.save_project():
+                event.accept()
+            else:
+                event.ignore()
+        elif choice == QMessageBox.StandardButton.Discard:
+            event.accept()
+        else:
+            event.ignore()

@@ -72,6 +72,42 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         self.assertEqual(received, [False])
         panel.deleteLater()
 
+    def test_error_map_colour_mode_emits_the_selected_metric(self):
+        panel = ControlPanel()
+        panel.add_dataset_to_list("project")
+        panel.dataset_list.setCurrentRow(0)
+        panel.set_error_map_display_state(True, True)
+        received = []
+        panel.error_map_colour_mode_changed.connect(received.append)
+
+        panel.error_map_colour_mode_combo.setCurrentIndex(1)
+
+        self.assertEqual(received, ["difference_from_mean"])
+        panel.deleteLater()
+
+    def test_move_controls_emit_a_list_reorder_and_keep_reference_selectors_in_sync(self):
+        panel = ControlPanel()
+        panel.add_dataset_to_list("project")
+        panel.add_dataset_to_list("reference")
+        panel.add_dataset_to_list("check")
+        panel.dataset_list.setCurrentRow(1)
+        received = []
+        panel.move_dataset_requested.connect(lambda *values: received.append(values))
+
+        panel._on_move_up_clicked()
+        panel.move_dataset_in_list(1, 0)
+
+        self.assertEqual(received, [(1, 0)])
+        self.assertEqual(
+            [panel.dataset_list.item(index).text() for index in range(panel.dataset_list.count())],
+            ["reference", "project", "check"],
+        )
+        self.assertEqual(
+            [panel.comparison_target_combo.itemText(index) for index in range(panel.comparison_target_combo.count())],
+            ["reference", "project", "check"],
+        )
+        panel.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

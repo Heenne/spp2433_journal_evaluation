@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QSlider, QComboBox, 
     QCheckBox, QPushButton, QGroupBox, QHBoxLayout, QFileDialog, QListWidget, QListWidgetItem,
-    QDoubleSpinBox, QSpinBox, QTabWidget, QFormLayout, QInputDialog, QMessageBox, QScrollArea
+    QDoubleSpinBox, QSpinBox, QTabWidget, QFormLayout, QInputDialog, QMessageBox, QScrollArea, QGridLayout
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -10,6 +10,7 @@ class ControlPanel(QWidget):
     add_dataset_requested = pyqtSignal()
     add_quick_ref_requested = pyqtSignal()
     remove_dataset_requested = pyqtSignal(int)
+    move_dataset_requested = pyqtSignal(int, int)
     selection_changed = pyqtSignal(int)
     visibility_toggled = pyqtSignal(int, bool)
     settings_changed = pyqtSignal()
@@ -20,6 +21,9 @@ class ControlPanel(QWidget):
     run_auto_alignment_requested = pyqtSignal(int, int, int, float, float, float, float, float, float) # source, reference, points, +/- Tx/Ty/Tz, +/- Rx/Ry/Rz
     calculate_error_requested = pyqtSignal(int, int, float, int, bool, bool) # source_idx, reference_idx, cutoff, max_analysis_points, show_map, highlight_above_mean
     error_map_display_changed = pyqtSignal(bool)
+    error_map_colour_mode_changed = pyqtSignal(str)
+    camera_view_requested = pyqtSignal(str)
+    camera_rotate_requested = pyqtSignal(float)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,10 +51,20 @@ class ControlPanel(QWidget):
         
         self.btn_remove = QPushButton("Remove Selected")
         self.btn_remove.clicked.connect(self._on_remove_clicked)
+
+        self.btn_move_up = QPushButton("Move Up")
+        self.btn_move_up.setToolTip("Move the selected cloud earlier in the list. Earlier clouds are drawn on top.")
+        self.btn_move_up.clicked.connect(self._on_move_up_clicked)
+
+        self.btn_move_down = QPushButton("Move Down")
+        self.btn_move_down.setToolTip("Move the selected cloud later in the list. Later clouds are drawn underneath.")
+        self.btn_move_down.clicked.connect(self._on_move_down_clicked)
         
         btn_layout.addWidget(self.btn_add)
         btn_layout.addWidget(self.btn_add_quick_ref)
         btn_layout.addWidget(self.btn_remove)
+        btn_layout.addWidget(self.btn_move_up)
+        btn_layout.addWidget(self.btn_move_down)
         list_layout.addLayout(btn_layout)
         list_group.setLayout(list_layout)
         layout.addWidget(list_group)
@@ -86,6 +100,18 @@ class ControlPanel(QWidget):
         )
         self.show_error_map_check.toggled.connect(self.error_map_display_changed.emit)
         analysis_display_layout.addWidget(self.show_error_map_check)
+        self.error_map_colour_mode_combo = QComboBox()
+        self.error_map_colour_mode_combo.addItem("Closest-reference distance", "closest_distance")
+        self.error_map_colour_mode_combo.addItem("Difference from mean distance", "difference_from_mean")
+        self.error_map_colour_mode_combo.setToolTip(
+            "Closest-reference distance colours each point by its actual nearest-reference error. "
+            "Difference from mean distance centres a blue-white-red scale on the calculated mean error."
+        )
+        self.error_map_colour_mode_combo.currentIndexChanged.connect(
+            lambda _: self.error_map_colour_mode_changed.emit(self.error_map_colour_mode_combo.currentData())
+        )
+        analysis_display_layout.addWidget(QLabel("Error-map colouring:"))
+        analysis_display_layout.addWidget(self.error_map_colour_mode_combo)
         error_map_info = QLabel(
             "Available after a surface-error calculation. The normal cloud colours are restored when disabled."
         )
@@ -95,6 +121,35 @@ class ControlPanel(QWidget):
         analysis_display_group.setLayout(analysis_display_layout)
         data_layout.addWidget(analysis_display_group)
         self.analysis_display_group = analysis_display_group
+
+        camera_group = QGroupBox("Camera Orientation")
+        camera_layout = QGridLayout()
+
+        def camera_button(label, view_name, tooltip):
+            button = QPushButton(label)
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda: self.camera_view_requested.emit(view_name))
+            return button
+
+        camera_layout.addWidget(camera_button("Top (+Z)", "top", "Look down the positive Z axis."), 0, 1)
+        camera_layout.addWidget(camera_button("+X", "positive_x", "Look along the positive X axis."), 1, 0)
+        camera_layout.addWidget(camera_button("−Y", "negative_y", "Look along the negative Y axis (front view)."), 1, 1)
+        camera_layout.addWidget(camera_button("−X", "negative_x", "Look along the negative X axis."), 1, 2)
+        camera_layout.addWidget(camera_button("+Y", "positive_y", "Look along the positive Y axis (back view)."), 2, 1)
+        camera_layout.addWidget(camera_button("Bottom (−Z)", "bottom", "Look up the negative Z axis."), 3, 1)
+
+        rotate_left = QPushButton("↺ 90°")
+        rotate_left.setToolTip("Rotate the camera 90 degrees counter-clockwise around Z.")
+        rotate_left.clicked.connect(lambda: self.camera_rotate_requested.emit(-90.0))
+        isometric = camera_button("Isometric", "isometric", "Restore a useful 3-D isometric camera angle.")
+        rotate_right = QPushButton("↻ 90°")
+        rotate_right.setToolTip("Rotate the camera 90 degrees clockwise around Z.")
+        rotate_right.clicked.connect(lambda: self.camera_rotate_requested.emit(90.0))
+        camera_layout.addWidget(rotate_left, 4, 0)
+        camera_layout.addWidget(isometric, 4, 1)
+        camera_layout.addWidget(rotate_right, 4, 2)
+        camera_group.setLayout(camera_layout)
+        data_layout.addWidget(camera_group)
         
         export_group = QGroupBox("Export")
         export_layout = QVBoxLayout()
@@ -476,7 +531,7 @@ class ControlPanel(QWidget):
         
         # Group parts that require selection
         self.requires_selection_widgets = [
-            colors_group, analysis_display_group, voxel_group, outlier_group,
+            colors_group, analysis_display_group, camera_group, voxel_group, outlier_group,
             self.btn_save_data, manual_group, icp_group, legacy_global_group, auto_group, comparison_group
         ]
         self._enable_selection_widgets(False)
@@ -485,12 +540,16 @@ class ControlPanel(QWidget):
         for w in self.requires_selection_widgets:
             w.setEnabled(enable)
 
-    def set_error_map_display_state(self, available: bool, shown: bool = False):
+    def set_error_map_display_state(self, available: bool, shown: bool = False, colour_mode: str = "closest_distance"):
         """Synchronise the runtime-only error-map display control for a dataset."""
         self.analysis_display_group.setEnabled(available)
         self.show_error_map_check.blockSignals(True)
         self.show_error_map_check.setChecked(bool(shown) if available else False)
         self.show_error_map_check.blockSignals(False)
+        self.error_map_colour_mode_combo.blockSignals(True)
+        mode_index = self.error_map_colour_mode_combo.findData(colour_mode)
+        self.error_map_colour_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+        self.error_map_colour_mode_combo.blockSignals(False)
             
     def add_dataset_to_list(self, name: str, checked: bool = True):
         item = QListWidgetItem(name)
@@ -511,6 +570,25 @@ class ControlPanel(QWidget):
         self.legacy_global_target_combo.removeItem(idx)
         self.auto_target_combo.removeItem(idx)
         self.comparison_target_combo.removeItem(idx)
+
+    def move_dataset_in_list(self, old_idx: int, new_idx: int):
+        """Move the list item and every reference selector in the same order."""
+        if old_idx == new_idx or not (0 <= old_idx < self.dataset_list.count() and 0 <= new_idx < self.dataset_list.count()):
+            return
+        item = self.dataset_list.takeItem(old_idx)
+        self.dataset_list.insertItem(new_idx, item)
+        for combo in (
+            self.icp_target_combo,
+            self.legacy_global_target_combo,
+            self.auto_target_combo,
+            self.comparison_target_combo,
+        ):
+            current_text = combo.currentText()
+            moved_text = combo.itemText(old_idx)
+            combo.removeItem(old_idx)
+            combo.insertItem(new_idx, moved_text)
+            combo.setCurrentText(current_text)
+        self.dataset_list.setCurrentRow(new_idx)
         
     def _on_selection_changed(self):
         idx = self.dataset_list.currentRow()
@@ -527,6 +605,16 @@ class ControlPanel(QWidget):
         idx = self.dataset_list.currentRow()
         if idx >= 0:
             self.remove_dataset_requested.emit(idx)
+
+    def _on_move_up_clicked(self):
+        idx = self.dataset_list.currentRow()
+        if idx > 0:
+            self.move_dataset_requested.emit(idx, idx - 1)
+
+    def _on_move_down_clicked(self):
+        idx = self.dataset_list.currentRow()
+        if 0 <= idx < self.dataset_list.count() - 1:
+            self.move_dataset_requested.emit(idx, idx + 1)
             
     def _on_settings_changed(self):
         if self.signalsBlocked():

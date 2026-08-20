@@ -9,10 +9,15 @@ class PlotCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         self.fig = Figure(figsize=(width, height), dpi=dpi, constrained_layout=True)
         self.axes = self.fig.add_subplot(111, projection='3d')
+        # Matplotlib's 3-D axes normally reorder entire scatter collections by
+        # depth. Keeping explicit z-orders lets the user deliberately overlay
+        # a selected cloud while finding a rough manual pose.
+        self.axes.computed_zorder = False
         
         super(PlotCanvas, self).__init__(self.fig)
         self.setParent(parent)
         self.colorbars = []
+        self._has_plotted_data = False
         
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.updateGeometry()
@@ -47,8 +52,44 @@ class PlotCanvas(FigureCanvas):
         self.axes.set_zlim3d(new_zlim)
         self.draw_idle()
 
+    def set_standard_view(self, view_name: str):
+        """Set a named orthographic-style inspection direction without redrawing data."""
+        views = {
+            "positive_x": (0.0, 0.0),
+            "negative_x": (0.0, 180.0),
+            "positive_y": (0.0, 90.0),
+            "negative_y": (0.0, -90.0),
+            "top": (90.0, -90.0),
+            "bottom": (-90.0, -90.0),
+            "isometric": (30.0, -60.0),
+        }
+        if view_name not in views:
+            return
+        elev, azim = views[view_name]
+        self.axes.view_init(elev=elev, azim=azim)
+        self.draw_idle()
+
+    def rotate_camera_around_vertical(self, degrees: float):
+        """Rotate the current inspection direction in 90-degree increments."""
+        self.axes.view_init(elev=self.axes.elev, azim=self.axes.azim + degrees)
+        self.draw_idle()
+
         
     def plot_datasets(self, datasets: list):
+        # ``cla`` resets the 3-D camera. Preserve it after the first plot so a
+        # manual transform updates the geometry without losing the user's
+        # zoomed/panned inspection view.
+        view_state = None
+        if self._has_plotted_data:
+            view_state = {
+                "elev": self.axes.elev,
+                "azim": self.axes.azim,
+                "roll": getattr(self.axes, "roll", None),
+                "xlim": self.axes.get_xlim3d(),
+                "ylim": self.axes.get_ylim3d(),
+                "zlim": self.axes.get_zlim3d(),
+            }
+
         # A colourbar changes the parent axes' layout. Remove it *before*
         # clearing those axes; doing this in the opposite order leaves some
         # Matplotlib versions with a detached colourbar axes and crashes on
@@ -87,10 +128,13 @@ class PlotCanvas(FigureCanvas):
         colorbar_added = False
         error_map_shown = False
         
-        for d in visible_datasets:
+        for layer_index, d in enumerate(visible_datasets):
             df = d["df_filtered"]
             st = d["settings"]
             name = d["name"]
+            # The list is the layer stack: its first visible cloud is painted
+            # last/highest, then each following one lies underneath it.
+            zorder = len(visible_datasets) - layer_index + 1
             
             x = df['X'].copy()
             y = df['Y'].copy()
@@ -115,31 +159,43 @@ class PlotCanvas(FigureCanvas):
                 in_overlap = np.isfinite(distances)
                 point_size = 8
                 if np.any(in_overlap):
+                    colour_mode = error_map.get("colour_mode", "closest_distance")
+                    mean = error_map.get("mean")
+                    if colour_mode == "difference_from_mean" and mean is not None and np.isfinite(mean):
+                        colour_values = distances[in_overlap] - float(mean)
+                        colour_limit = max(float(np.max(np.abs(colour_values))), np.finfo(float).eps)
+                        colour_kwargs = {"cmap": "coolwarm", "vmin": -colour_limit, "vmax": colour_limit}
+                        colourbar_label = "Closest-reference distance minus mean (data units)"
+                        mean_marker = 0.0
+                    else:
+                        colour_values = distances[in_overlap]
+                        colour_kwargs = {"cmap": "turbo", "vmin": 0.0, "vmax": cutoff}
+                        colourbar_label = "Unsigned distance to reference (data units)"
+                        mean_marker = mean
                     scatter = self.axes.scatter(
-                        x[in_overlap], y[in_overlap], z[in_overlap], c=distances[in_overlap],
-                        cmap="turbo", vmin=0.0, vmax=cutoff, marker='.', s=point_size,
+                        x[in_overlap], y[in_overlap], z[in_overlap], c=colour_values,
+                        marker='.', s=point_size, zorder=zorder, **colour_kwargs,
                         label=f"{name} error",
                     )
                     cb = self.fig.colorbar(
-                        scatter, ax=self.axes, label="Unsigned distance to reference (data units)", pad=0.1
+                        scatter, ax=self.axes, label=colourbar_label, pad=0.1
                     )
                     self.colorbars.append(cb)
-                    mean = error_map.get("mean")
-                    if mean is not None and np.isfinite(mean):
-                        cb.ax.axhline(float(mean), color="white", linewidth=1.5)
-                        cb.ax.axhline(float(mean), color="black", linewidth=0.5, linestyle="--")
+                    if mean_marker is not None and np.isfinite(mean_marker):
+                        cb.ax.axhline(float(mean_marker), color="white", linewidth=1.5)
+                        cb.ax.axhline(float(mean_marker), color="black", linewidth=0.5, linestyle="--")
                     colorbar_added = True
                 if np.any(~in_overlap):
                     self.axes.scatter(
                         x[~in_overlap], y[~in_overlap], z[~in_overlap], c="0.55", marker='.', s=point_size,
-                        label=f"{name} outside cutoff",
+                        label=f"{name} outside cutoff", zorder=zorder,
                     )
                 if error_map.get("highlight_above_mean") and error_map.get("mean") is not None:
                     above_mean = in_overlap & (distances > float(error_map["mean"]))
                     if np.any(above_mean):
                         self.axes.scatter(
                             x[above_mean], y[above_mean], z[above_mean], c="red", marker='.', s=point_size,
-                            label=f"{name} > mean error",
+                            label=f"{name} > mean error", zorder=zorder + 1,
                         )
                 error_map_shown = True
                 continue
@@ -149,13 +205,15 @@ class PlotCanvas(FigureCanvas):
             
             if color_col and color_col in df.columns:
                 c = df[color_col]
-                scatter = self.axes.scatter(x, y, z, c=c, cmap=cm.viridis, marker='.', s=10, label=name)
+                scatter = self.axes.scatter(
+                    x, y, z, c=c, cmap=cm.viridis, marker='.', s=10, label=name, zorder=zorder
+                )
                 if not colorbar_added:
                     cb = self.fig.colorbar(scatter, ax=self.axes, label=color_col, pad=0.1)
                     self.colorbars.append(cb)
                     colorbar_added = True
             else:
-                self.axes.scatter(x, y, z, c=base_color, marker='.', s=10, label=name)
+                self.axes.scatter(x, y, z, c=base_color, marker='.', s=10, label=name, zorder=zorder)
             
         self.axes.set_xlabel('X')
         self.axes.set_ylabel('Y')
@@ -181,6 +239,23 @@ class PlotCanvas(FigureCanvas):
                 self.axes.set_box_aspect((x_range, y_range, z_range))
             except AttributeError:
                 pass
+
+        if view_state is not None:
+            try:
+                if view_state["roll"] is None:
+                    self.axes.view_init(elev=view_state["elev"], azim=view_state["azim"])
+                else:
+                    self.axes.view_init(
+                        elev=view_state["elev"], azim=view_state["azim"], roll=view_state["roll"]
+                    )
+            except TypeError:
+                # Older Matplotlib releases do not accept the roll argument.
+                self.axes.view_init(elev=view_state["elev"], azim=view_state["azim"])
+            self.axes.set_xlim3d(view_state["xlim"])
+            self.axes.set_ylim3d(view_state["ylim"])
+            self.axes.set_zlim3d(view_state["zlim"])
+
+        self._has_plotted_data = True
             
         self.draw_idle()
 
