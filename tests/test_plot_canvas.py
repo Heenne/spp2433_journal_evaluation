@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 
 import numpy as np
@@ -9,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 
 from src.ui.plot_canvas import PlotCanvas
+from src.ui.main_window import MainWindow
 
 
 class PointwiseErrorMapPlotTests(unittest.TestCase):
@@ -99,6 +101,17 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
 
         self.assertAlmostEqual(canvas.axes.elev, 0.0)
         self.assertAlmostEqual(canvas.axes.azim, 90.0)
+        canvas.set_standard_view("diagonal_negative_x_positive_y_positive_z")
+        self.assertAlmostEqual(canvas.axes.elev, -30.0)
+        self.assertAlmostEqual(canvas.axes.azim, -45.0)
+        self.assertAlmostEqual(canvas.axes.roll, 180.0)
+        canvas.deleteLater()
+
+    def test_explicit_camera_angles_can_be_set_and_read(self):
+        canvas = PlotCanvas()
+        canvas.set_camera_angles(21.0, -77.0, 12.0)
+
+        self.assertEqual(canvas.camera_angles(), (21.0, -77.0, 12.0))
         canvas.deleteLater()
 
     def test_new_visible_cloud_refits_limits_but_refreshing_the_same_one_preserves_them(self):
@@ -124,6 +137,51 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
         self.assertGreater(canvas.axes.get_xlim3d()[0], 90.0)
         canvas.reset_view_to_data()
         self.assertGreater(canvas.axes.get_xlim3d()[0], 90.0)
+        canvas.deleteLater()
+
+    def test_full_resolution_export_renders_offscreen_without_display_voxel_filter(self):
+        dataset = {
+            "name": "project",
+            "visible": True,
+            "df": pd.DataFrame(
+                [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]], columns=["X", "Y", "Z"]
+            ),
+            "settings": {"base_color": "C0", "voxel_enabled": True, "voxel_size": 10.0},
+        }
+        canvas = PlotCanvas()
+        canvas.plot_datasets([{**dataset, "df_filtered": dataset["df"]}])
+        window = MainWindow.__new__(MainWindow)
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "full_resolution.png")
+            window.export_full_resolution_background([dataset], output, window._export_view_state(canvas))
+            self.assertTrue(os.path.exists(output))
+            self.assertGreater(os.path.getsize(output), 0)
+        canvas.deleteLater()
+
+    def test_full_resolution_export_recalculates_an_active_error_colour_map(self):
+        reference = {
+            "name": "reference", "filepath": "reference.csv", "visible": True,
+            "df": pd.DataFrame([[0.0, 0.0, 0.0]], columns=["X", "Y", "Z"]),
+            "settings": {"base_color": "C2"},
+        }
+        source = {
+            "name": "source", "filepath": "source.csv", "visible": True,
+            "df": pd.DataFrame([[0.2, 0.0, 0.0], [5.0, 0.0, 0.0]], columns=["X", "Y", "Z"]),
+            "settings": {"base_color": "C3", "voxel_enabled": True, "voxel_size": 10.0},
+            "show_error_visualization": True,
+            "error_visualization": {
+                "reference_filepath": "reference.csv", "reference_name": "reference", "cutoff": 1.0,
+                "mean": 0.2, "unit": "mm", "colour_mode": "closest_distance",
+            },
+        }
+        canvas = PlotCanvas()
+        canvas.plot_datasets([{**source, "df_filtered": source["df"]}, {**reference, "df_filtered": reference["df"]}])
+        window = MainWindow.__new__(MainWindow)
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "error_map.png")
+            result = window.export_full_resolution_background([source, reference], output, window._export_view_state(canvas))
+            self.assertEqual(result["error_maps_rendered"], 1)
+            self.assertTrue(os.path.exists(output))
         canvas.deleteLater()
 
 

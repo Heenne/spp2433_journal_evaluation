@@ -17,7 +17,7 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         panel = ControlPanel()
         self.assertEqual(
             [panel.tabs.tabText(index) for index in range(panel.tabs.count())],
-            ["Data & Display", "Filtering", "Manual Transform", "Legacy Alignment", "Fine Align & Error"],
+            ["Data & Display", "Filtering", "Manual Transform", "Legacy Alignment", "Fine Align & Error", "Export"],
         )
         panel.add_dataset_to_list("project")
         panel.add_dataset_to_list("reference")
@@ -43,7 +43,7 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         panel = ControlPanel()
         panel.add_dataset_to_list("project")
         panel.add_dataset_to_list("reference")
-        panel.dataset_list.setCurrentRow(0)
+        panel.comparison_source_combo.setCurrentIndex(0)
         panel.comparison_target_combo.setCurrentIndex(1)
         received = []
         panel.calculate_error_requested.connect(lambda *values: received.append(values))
@@ -53,6 +53,33 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0][:4], (0, 1, 1.0, 250_000))
         self.assertEqual(received[0][4:], (True, False))
+        panel.deleteLater()
+
+    def test_surface_error_has_separate_source_and_reference_selectors(self):
+        panel = ControlPanel()
+        panel.add_dataset_to_list("project")
+        panel.add_dataset_to_list("reference")
+
+        self.assertEqual(panel.comparison_source_combo.currentIndex(), 0)
+        self.assertEqual(panel.comparison_target_combo.currentIndex(), 1)
+        self.assertFalse(panel.comparison_target_combo.model().item(0).isEnabled())
+        self.assertFalse(panel.comparison_source_combo.model().item(1).isEnabled())
+
+        # Even a programmatic collision is resolved to two different clouds.
+        panel.comparison_source_combo.setCurrentIndex(1)
+        self.assertNotEqual(
+            panel.comparison_source_combo.currentIndex(),
+            panel.comparison_target_combo.currentIndex(),
+        )
+        panel.deleteLater()
+
+    def test_distance_unit_defaults_to_mm_and_is_saved_with_dataset_settings(self):
+        panel = ControlPanel()
+        self.assertEqual(panel.distance_unit_combo.currentText(), "mm")
+        panel.distance_unit_combo.setCurrentText("m")
+
+        self.assertEqual(panel.get_current_settings()["distance_unit"], "m")
+        self.assertEqual(panel.tx_label.text(), "Translate X (m):")
         panel.deleteLater()
 
     def test_error_map_display_switch_is_disabled_until_a_map_exists(self):
@@ -83,6 +110,89 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         panel.error_map_colour_mode_combo.setCurrentIndex(1)
 
         self.assertEqual(received, ["difference_from_mean"])
+        panel.deleteLater()
+
+    def test_camera_angle_controls_read_and_emit_explicit_orientation(self):
+        panel = ControlPanel()
+        panel.set_camera_angles(12.5, -34.0, 7.5)
+        received = []
+        panel.camera_angles_requested.connect(lambda *angles: received.append(angles))
+
+        panel._on_apply_camera_angles_clicked()
+
+        self.assertEqual(received, [(12.5, -34.0, 7.5)])
+        panel.deleteLater()
+
+    def test_export_options_collect_heatmap_axis_and_legend_settings(self):
+        panel = ControlPanel()
+        panel.export_heatmap_check.setChecked(False)
+        panel.export_heightmap_check.setChecked(True)
+        panel.export_heatmap_colormap_combo.setCurrentText("magma")
+        panel.export_heightmap_colormap_combo.setCurrentText("cividis")
+        panel.export_colourbar_height_spin.setValue(0.65)
+        panel.export_point_size_spin.setValue(0.4)
+        panel.export_x_axis_name.setText("Chord (mm)")
+        panel.export_legend_point_size_spin.setValue(25.0)
+        panel.export_legend_title.setText("Measurements")
+        panel.export_legend_labels.setPlainText("raw = Reference\nscan = Project scan")
+        panel.export_legend_position_combo.setCurrentIndex(
+            panel.export_legend_position_combo.findData("lower left")
+        )
+        panel.export_legend_placement_combo.setCurrentIndex(
+            panel.export_legend_placement_combo.findData("outside")
+        )
+
+        options = panel.get_export_options()
+
+        self.assertFalse(options["use_heatmap"])
+        self.assertTrue(options["use_heightmap"])
+        self.assertEqual(options["heatmap_colormap"], "magma")
+        self.assertEqual(options["heightmap_colormap"], "cividis")
+        self.assertEqual(options["point_size"], 0.4)
+        self.assertEqual(options["x_label"], "Chord (mm)")
+        self.assertEqual(options["legend_title"], "Measurements")
+        self.assertEqual(options["legend_point_size"], 25.0)
+        self.assertEqual(options["legend_position"], "lower left")
+        self.assertEqual(options["legend_placement"], "outside")
+        self.assertEqual(options["legend_labels"], {"raw": "Reference", "scan": "Project scan"})
+        panel.deleteLater()
+
+    def test_error_and_height_export_maps_are_mutually_exclusive(self):
+        panel = ControlPanel()
+        panel.export_heightmap_check.setChecked(True)
+        self.assertFalse(panel.export_heatmap_check.isChecked())
+        panel.export_heatmap_check.setChecked(True)
+        self.assertFalse(panel.export_heightmap_check.isChecked())
+        panel.deleteLater()
+
+    def test_plain_export_legend_labels_follow_visible_cloud_order(self):
+        panel = ControlPanel()
+        panel.add_dataset_to_list("reference")
+        panel.add_dataset_to_list("scan")
+        panel.export_legend_labels.setPlainText("Reference surface\nMeasured cloud")
+
+        self.assertEqual(
+            panel.get_export_options()["legend_labels"],
+            {"reference": "Reference surface", "scan": "Measured cloud"},
+        )
+        panel.deleteLater()
+
+    def test_loading_clouds_adds_editable_legend_label_rows(self):
+        panel = ControlPanel()
+        panel.add_dataset_to_list("reference.csv")
+        panel.add_dataset_to_list("scan.csv")
+
+        panel.export_legend_labels.setPlainText(
+            "Reference surface\nMeasured surface"
+        )
+        self.assertEqual(
+            panel.get_export_options()["legend_labels"],
+            {"reference.csv": "Reference surface", "scan.csv": "Measured surface"},
+        )
+        self.assertEqual(
+            panel.get_export_options()["legend_label_lines"],
+            ["Reference surface", "Measured surface"],
+        )
         panel.deleteLater()
 
     def test_move_controls_emit_a_list_reorder_and_keep_reference_selectors_in_sync(self):

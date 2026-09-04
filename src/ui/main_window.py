@@ -4,10 +4,10 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
     QMessageBox, QMenu, QApplication, QProgressBar, QPushButton, QSplitter,
-    QToolBar, QToolButton, QStyle
+    QToolBar, QToolButton, QStyle, QDialog, QLabel
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QPixmap
 from src.ui.plot_canvas import PlotCanvas
 from src.ui.control_panel import ControlPanel
 from src.data.parser import parse_point_cloud_file
@@ -19,7 +19,7 @@ from src.data.filter import (
 from src.data.centering import centre_point_cloud, save_centred_point_cloud
 from src.utils.registration import (
     run_icp, automatic_registration, global_automatic_registration, calculate_cloud_error,
-    euler_translation_to_matrix, matrix_to_euler_translation,
+    euler_translation_to_matrix, matrix_to_euler_translation, _comparison_footprint_masks,
 )
 from src.utils.worker import WorkerThread
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
@@ -129,6 +129,9 @@ class MainWindow(QMainWindow):
         self.control_panel.visibility_toggled.connect(self.on_visibility_toggled)
         self.control_panel.settings_changed.connect(self.on_settings_changed)
         self.control_panel.export_requested.connect(self.export_plot)
+        self.control_panel.export_full_resolution_requested.connect(self.export_full_resolution_plot)
+        self.control_panel.export_configured_requested.connect(self.export_configured_plot)
+        self.control_panel.export_preview_requested.connect(self.preview_export_settings)
         self.control_panel.save_data_requested.connect(self.save_filtered_dataset)
         self.control_panel.centre_data_requested.connect(self.create_centred_copy)
         self.control_panel.run_icp_requested.connect(self.on_run_icp)
@@ -139,6 +142,8 @@ class MainWindow(QMainWindow):
         self.control_panel.error_map_colour_mode_changed.connect(self.on_error_map_colour_mode_changed)
         self.control_panel.camera_view_requested.connect(self.on_camera_view_requested)
         self.control_panel.camera_rotate_requested.connect(self.on_camera_rotate_requested)
+        self.control_panel.camera_angles_requested.connect(self.on_camera_angles_requested)
+        self.control_panel.camera_angles_read_requested.connect(self.on_camera_angles_read_requested)
         
         # Plot Canvas
         plot_layout = QVBoxLayout()
@@ -201,6 +206,10 @@ class MainWindow(QMainWindow):
             self.save_worker.cancel()
         if hasattr(self, 'centre_worker') and self.centre_worker.isRunning():
             self.centre_worker.cancel()
+        if hasattr(self, 'full_resolution_export_worker') and self.full_resolution_export_worker.isRunning():
+            self.full_resolution_export_worker.cancel()
+        if hasattr(self, 'export_preview_worker') and self.export_preview_worker.isRunning():
+            self.export_preview_worker.cancel()
         self.statusBar().showMessage("Cancelling... (Waiting for worker to abort)")
         
     def open_convert_dialog(self):
@@ -355,6 +364,12 @@ class MainWindow(QMainWindow):
             # Clear existing datasets.
             for i in range(len(self.datasets) - 1, -1, -1):
                 self.remove_dataset(i)
+
+            # Apply this only after the final asynchronous load has rendered
+            # its data.  ``plot_datasets`` deliberately fits new data and
+            # would otherwise replace the restored camera orientation.
+            self._pending_project_camera_view = data.get("camera_view")
+            self._restore_project_camera_after_final_load = False
             
             # Load all files in the project
             for entry in normalized_entries:
@@ -363,6 +378,9 @@ class MainWindow(QMainWindow):
                     self.load_file(fp, visible=entry["visible"], mark_project_dirty=False)
                 else:
                     QMessageBox.warning(self, "Missing File", f"Could not find dataset file:\n{fp}")
+
+            if not any(os.path.exists(entry["filepath"]) for entry in normalized_entries):
+                self._apply_pending_project_camera_view()
                     
             self.project_filepath = filepath
             self.set_project_dirty(False)
@@ -381,12 +399,37 @@ class MainWindow(QMainWindow):
     def _project_data(self):
         """Serialize project-owned state, including layer order and visibility."""
         return {
-            "format_version": 2,
+            "format_version": 3,
+            "camera_view": {
+                "elevation": self.plot_canvas.camera_angles()[0],
+                "azimuth": self.plot_canvas.camera_angles()[1],
+                "roll": self.plot_canvas.camera_angles()[2],
+            },
             "datasets": [
                 {"filepath": dataset["filepath"], "visible": bool(dataset.get("visible", True))}
                 for dataset in self.datasets
             ],
         }
+
+    def _apply_pending_project_camera_view(self):
+        """Restore a saved project camera after its first data render.
+
+        Old project files simply omit this optional field and keep the current
+        camera orientation.
+        """
+        view = getattr(self, "_pending_project_camera_view", None)
+        self._pending_project_camera_view = None
+        if not isinstance(view, dict):
+            return
+        try:
+            elevation = float(view["elevation"])
+            azimuth = float(view["azimuth"])
+            roll = float(view.get("roll", 0.0))
+        except (KeyError, TypeError, ValueError):
+            return
+
+        self.plot_canvas.set_camera_angles(elevation, azimuth, roll)
+        self.control_panel.set_camera_angles(*self.plot_canvas.camera_angles())
 
     def _save_project_to_file(self, filepath: str) -> bool:
         try:
@@ -480,7 +523,7 @@ class MainWindow(QMainWindow):
                     "sor_enabled": False, "sor_k": 50, "sor_std": 1.0,
                     "bbox_enabled": False, "bbox_zmin": -1000.0, "bbox_zmax": 1000.0,
                     "voxel_enabled": False, "voxel_size": auto_voxel_size,
-                    "scale": 1.0,
+                    "scale": 1.0, "distance_unit": "mm",
                     "tx": 0.0, "ty": 0.0, "tz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0
                 }
                 if len(df) > 100000:
@@ -489,7 +532,7 @@ class MainWindow(QMainWindow):
                         self, 
                         "Auto-Filter Activated", 
                         f"Dataset {name} has {len(df):,} points which could cause lag.\n\n"
-                        f"A Voxel Downsample filter has been automatically enabled with a size of {auto_voxel_size:.3f} units."
+                        f"A Voxel Downsample filter has been automatically enabled with a size of {auto_voxel_size:.3f} mm."
                     )
                         
             dataset = {
@@ -510,6 +553,7 @@ class MainWindow(QMainWindow):
                 self.process_load_queue()
             else:
                 self.set_loading_state(False)
+                self._restore_project_camera_after_final_load = True
                 self.update_plot()
             
         def on_error(err_str):
@@ -598,9 +642,21 @@ class MainWindow(QMainWindow):
 
     def on_camera_view_requested(self, view_name: str):
         self.plot_canvas.set_standard_view(view_name)
+        self.control_panel.set_camera_angles(*self.plot_canvas.camera_angles())
+        self.set_project_dirty(True)
 
     def on_camera_rotate_requested(self, degrees: float):
         self.plot_canvas.rotate_camera_around_vertical(float(degrees))
+        self.control_panel.set_camera_angles(*self.plot_canvas.camera_angles())
+        self.set_project_dirty(True)
+
+    def on_camera_angles_requested(self, elevation: float, azimuth: float, roll: float):
+        self.plot_canvas.set_camera_angles(elevation, azimuth, roll)
+        self.control_panel.set_camera_angles(*self.plot_canvas.camera_angles())
+        self.set_project_dirty(True)
+
+    def on_camera_angles_read_requested(self):
+        self.control_panel.set_camera_angles(*self.plot_canvas.camera_angles())
             
     def apply_transform(self, df: pd.DataFrame, settings: dict) -> pd.DataFrame:
         """Apply axis convention, uniform scale, then manual rotation and translation."""
@@ -679,6 +735,9 @@ class MainWindow(QMainWindow):
                         d["last_settings"] = copy.deepcopy(d["settings"])
                     
             self.plot_canvas.plot_datasets(self.datasets)
+            if getattr(self, "_restore_project_camera_after_final_load", False):
+                self._restore_project_camera_after_final_load = False
+                self._apply_pending_project_camera_view()
             total_points = sum([len(d["df_filtered"]) for d in self.datasets if d["visible"] and "df_filtered" in d])
             msg = f"Showing {total_points} total points across {sum(1 for d in self.datasets if d['visible'])} dataset(s)."
             self.set_loading_state(False, msg)
@@ -779,6 +838,13 @@ class MainWindow(QMainWindow):
                 "preset": preset_name,
             },
         })
+        # A pointwise error map stores transformed source coordinates.  The
+        # newly saved pose changes those coordinates, so keeping an older map
+        # would draw the old cloud position and show old distances on top of
+        # the current overlay.  It is invalid for both source and reference.
+        for dataset in self.datasets:
+            dataset.pop("error_visualization", None)
+            dataset.pop("show_error_visualization", None)
         save_filter_config(source_dataset["filepath"], st)
         self.set_project_dirty(True)
         if self.control_panel.dataset_list.currentRow() == source_idx:
@@ -899,6 +965,7 @@ class MainWindow(QMainWindow):
 
         def on_finished(result):
             alignment, source, target = result
+            unit = source["settings"].get("distance_unit", "mm")
             baseline = alignment["baseline"]
             optimizer = alignment["optimizer"]
             baseline_summary = (
@@ -963,11 +1030,11 @@ class MainWindow(QMainWindow):
                 f"Rotation limits (+/-): ({alignment['rotation_limits_degrees'][0]:.2f}, "
                 f"{alignment['rotation_limits_degrees'][1]:.2f}, "
                 f"{alignment['rotation_limits_degrees'][2]:.2f}) degrees\n"
-                f"Capture distance: {alignment['capture_distance']:.6g}\n\n"
-                f"Correction at overlap pivot: {optimizer['translation_correction']:.6g} units "
+                f"Capture distance: {alignment['capture_distance']:.6g} {unit}\n\n"
+                f"Correction at the current source centroid: {optimizer['translation_correction']:.6g} {unit} "
                 f"({optimizer['translation_correction_vector'][0]:.6g}, "
                 f"{optimizer['translation_correction_vector'][1]:.6g}, "
-                f"{optimizer['translation_correction_vector'][2]:.6g}); "
+                f"{optimizer['translation_correction_vector'][2]:.6g}) {unit}; "
                 f"rotation XYZ ({optimizer['rotation_correction_vector_degrees'][0]:.2f}, "
                 f"{optimizer['rotation_correction_vector_degrees'][1]:.2f}, "
                 f"{optimizer['rotation_correction_vector_degrees'][2]:.2f}) degrees "
@@ -988,17 +1055,18 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _format_error_report(report):
+        unit = report.get("unit", "mm")
         overlap = f"{report['overlap_fraction']:.1%} ({report['overlap_points']:,} points)"
         sampled = "yes" if report["source_points_sampled"] else "no"
         if report["overlap_points"] == 0:
             return (
-                f"Overlap: {overlap}\nNo points were within the cutoff of {report['overlap_cutoff']:.6g}. "
+                f"Overlap: {overlap}\nNo points were within the cutoff of {report['overlap_cutoff']:.6g} {unit}. "
                 "Increase the cutoff or inspect the alignment."
             )
         return (
             f"Overlap: {overlap}; outside overlap: {report['non_overlap_points']:,}\n"
-            f"Mean: {report['mean']:.6g}; median: {report['median']:.6g}; "
-            f"RMSE: {report['rmse']:.6g}; P95: {report['p95']:.6g}; max: {report['maximum']:.6g}\n"
+            f"Min: {report['minimum']:.6g} {unit}; mean: {report['mean']:.6g} {unit}; median: {report['median']:.6g} {unit}; "
+            f"RMSE: {report['rmse']:.6g} {unit}; P95: {report['p95']:.6g} {unit}; max: {report['maximum']:.6g} {unit}\n"
             f"Analysed {report['source_points_analysed']:,} source points (sampled: {sampled}); "
             f"indexed {report['reference_points_indexed']:,} reference points."
         )
@@ -1017,6 +1085,7 @@ class MainWindow(QMainWindow):
             progress_callback=progress_callback,
             is_cancelled_callback=is_cancelled_callback,
             include_pointwise=True,
+            distance_unit=source_dataset["settings"].get("distance_unit", "mm"),
         )
         return report, pointwise, source_dataset, target_dataset
 
@@ -1049,7 +1118,9 @@ class MainWindow(QMainWindow):
             source["error_visualization"] = {
                 **pointwise,
                 "reference_name": target["name"],
+                "reference_filepath": target["filepath"],
                 "cutoff": report["overlap_cutoff"],
+                "unit": report["unit"],
                 "mean": report["mean"],
                 "highlight_above_mean": highlight_above_mean,
                 "colour_mode": "closest_distance",
@@ -1065,7 +1136,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Surface Error Report",
                 f"{source['name']} -> {target['name']}\n\n{summary}\n\n"
-                "Errors are unsigned nearest-reference distances in the data coordinate units. "
+                f"Errors are unsigned nearest-reference distances in {report['unit']}. "
                 "Points beyond the cutoff are treated as non-overlap and are excluded from the statistics."
                 + (" The plot now shows the analysed source points coloured by this distance; grey means outside the cutoff."
                    if show_error_map else ""),
@@ -1162,6 +1233,428 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Plot exported to {filepath}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export plot: {str(e)}")
+
+    @staticmethod
+    def _export_view_state(canvas):
+        """Capture the visible 3-D camera state before an off-screen export."""
+        return {
+            "elev": canvas.axes.elev,
+            "azim": canvas.axes.azim,
+            "roll": getattr(canvas.axes, "roll", None),
+            "xlim": canvas.axes.get_xlim3d(),
+            "ylim": canvas.axes.get_ylim3d(),
+            "zlim": canvas.axes.get_zlim3d(),
+            "box_aspect": canvas.axes.get_box_aspect(),
+        }
+
+    @staticmethod
+    def _trim_raster_export_whitespace(filepath: str, padding_pixels: int = 20):
+        """Crop unused white canvas around a PNG/JPEG export.
+
+        Matplotlib's 3-D axes reserve a rectangular layout region even when
+        the projected data occupies only its centre.  ``bbox_inches='tight'``
+        therefore cannot remove these empty bands reliably.  Raster exports
+        can be cropped accurately after rendering; SVG remains vector-native.
+        """
+        extension = os.path.splitext(filepath)[1].lower()
+        if extension not in {".png", ".jpg", ".jpeg"}:
+            return
+        try:
+            from PIL import Image
+
+            with Image.open(filepath) as image:
+                rgba = np.asarray(image.convert("RGBA"), dtype=np.float32)
+                # Some Matplotlib backends retain a transparent canvas.  Blend
+                # it onto the intended white background before thresholding;
+                # otherwise transparent pixels convert to black and prevent
+                # any crop at all.
+                alpha = rgba[:, :, 3:4] / 255.0
+                pixels = rgba[:, :, :3] * alpha + 255.0 * (1.0 - alpha)
+                # Treat almost-white pixels as background.  This avoids JPEG
+                # compression noise turning an otherwise blank margin into an
+                # un-croppable region.
+                # The 3-D pane background is a very pale grey.  Do not let
+                # that invisible rectangular pane define the crop; actual
+                # grid lines, text, points, and the colour bar are darker.
+                content = np.any(pixels < 235, axis=2)
+                rows, columns = np.where(content)
+                if not len(rows):
+                    return
+                top = max(0, int(rows.min()) - padding_pixels)
+                bottom = min(image.height, int(rows.max()) + padding_pixels + 1)
+                left = max(0, int(columns.min()) - padding_pixels)
+                right = min(image.width, int(columns.max()) + padding_pixels + 1)
+                # Copy before closing the input handle; Windows otherwise
+                # rejects overwriting the same export file while it is open.
+                cropped = image.crop((left, top, right, bottom)).copy()
+                image_format = image.format
+            cropped.save(filepath, format=image_format)
+        except (ImportError, OSError):
+            # Exporting the plot is still more important than optional
+            # whitespace trimming on an installation without Pillow.
+            return
+
+    def export_full_resolution_background(self, datasets, filepath: str, view_state: dict,
+                                          progress_callback=None, is_cancelled_callback=None,
+                                          export_options=None, use_display_points: bool = False):
+        """Render a non-interactive export without the display voxel filter."""
+        from matplotlib.figure import Figure
+        import matplotlib.cm as cm
+
+        # A shorter canvas avoids the large unused bands that 3-D projections
+        # otherwise leave above and below a shallow surface scan.
+        figure = Figure(figsize=(10, 6.5), dpi=150, constrained_layout=True)
+        axes = figure.add_subplot(111, projection="3d")
+        export_options = export_options or {}
+        extension = os.path.splitext(filepath)[1].lower()
+        rasterize_points = extension == ".svg"
+        point_size = float(export_options.get("point_size", 2.0))
+        visible = [dataset for dataset in datasets if dataset.get("visible", False)]
+        if not visible:
+            raise ValueError("There are no visible point clouds to export.")
+
+        heightmap_enabled = bool(export_options.get("use_heightmap", False))
+        heightmap_frames = {}
+        height_min = height_max = None
+        if heightmap_enabled:
+            heights = []
+            for dataset in visible:
+                df = dataset.get("df_filtered") if use_display_points else self._apply_quality_filters(dataset)
+                if df is None or df.empty:
+                    continue
+                heightmap_frames[id(dataset)] = df
+                heights.append(df["Z"].to_numpy(dtype=float, copy=False))
+            if not heights:
+                raise ValueError("There are no visible point-cloud points to export after filtering.")
+            all_heights = np.concatenate(heights)
+            height_min = float(np.min(all_heights))
+            height_max = float(np.max(all_heights))
+            if height_max <= height_min:
+                height_max = height_min + np.finfo(float).eps
+
+        reference_points_cache = {}
+        error_maps_rendered = 0
+        height_mappable = None
+
+        def full_resolution_error_distances(dataset, source_points, error_map):
+            """Recompute an active error map for all export points."""
+            from scipy.spatial import cKDTree
+
+            reference_filepath = error_map.get("reference_filepath")
+            reference = next(
+                (candidate for candidate in datasets if candidate.get("filepath") == reference_filepath), None
+            )
+            if reference is None:
+                reference = next(
+                    (candidate for candidate in datasets if candidate.get("name") == error_map.get("reference_name")), None
+                )
+            if reference is None:
+                raise RuntimeError(
+                    f"The reference cloud for the active error map on '{dataset['name']}' is no longer loaded."
+                )
+            cache_key = reference.get("filepath", reference["name"])
+            if cache_key not in reference_points_cache:
+                reference_df = self._apply_quality_filters(reference)
+                reference_points_cache[cache_key] = reference_df[["X", "Y", "Z"]].to_numpy(dtype=float, copy=False)
+            reference_points = reference_points_cache[cache_key]
+            if not len(reference_points):
+                raise RuntimeError(f"The reference cloud for '{dataset['name']}' has no points after filtering.")
+            source_footprint, reference_footprint, _details = _comparison_footprint_masks(
+                source_points, reference_points
+            )
+            comparison_reference_points = reference_points[reference_footprint]
+            if not len(comparison_reference_points):
+                return np.full(len(source_points), np.inf, dtype=np.float64)
+            tree = cKDTree(comparison_reference_points)
+            cutoff = float(error_map["cutoff"])
+            distances = np.full(len(source_points), np.inf, dtype=np.float64)
+            footprint_indices = np.flatnonzero(source_footprint)
+            chunk_size = 100_000
+            for start in range(0, len(footprint_indices), chunk_size):
+                if is_cancelled_callback and is_cancelled_callback():
+                    raise RuntimeError("Cancelled by User")
+                stop = min(start + chunk_size, len(footprint_indices))
+                indices = footprint_indices[start:stop]
+                distances[indices], _ = tree.query(
+                    source_points[indices], k=1, distance_upper_bound=cutoff, workers=-1
+                )
+            return distances
+
+        for layer_index, dataset in enumerate(visible):
+            _check = is_cancelled_callback
+            if _check and _check():
+                raise RuntimeError("Cancelled by User")
+            if progress_callback:
+                progress_callback(f"Preparing full-resolution export: {dataset['name']} ({layer_index + 1}/{len(visible)})...")
+            # A preview/current-display export uses the already rendered
+            # display points.  Full resolution retains quality filters but
+            # deliberately leaves out display voxelisation.
+            df = heightmap_frames.get(id(dataset))
+            if df is None:
+                df = dataset.get("df_filtered") if use_display_points else self._apply_quality_filters(dataset)
+            if df is None:
+                df = self._apply_quality_filters(dataset)
+            if df.empty:
+                continue
+            settings = dataset["settings"]
+            zorder = len(visible) - layer_index + 1
+            points = df[["X", "Y", "Z"]].to_numpy(dtype=float, copy=False)
+            display_label = export_options.get("legend_labels", {}).get(dataset["name"], dataset["name"])
+            if heightmap_enabled:
+                height_mappable = axes.scatter(
+                    points[:, 0], points[:, 1], points[:, 2], c=points[:, 2],
+                    cmap=export_options.get("heightmap_colormap", "viridis"), vmin=height_min, vmax=height_max,
+                    marker=".", s=point_size, label=display_label, zorder=zorder,
+                    rasterized=rasterize_points, axlim_clip=True,
+                )
+                continue
+            error_map = dataset.get("error_visualization") if (
+                export_options.get("use_heatmap", True) and dataset.get("show_error_visualization", False)
+            ) else None
+            if error_map is not None:
+                if progress_callback:
+                    progress_callback(f"Calculating full-resolution error colours for {dataset['name']}...")
+                distances = full_resolution_error_distances(dataset, points, error_map)
+                cutoff = float(error_map["cutoff"])
+                in_overlap = np.isfinite(distances)
+                unit = error_map.get("unit", "mm")
+                if np.any(in_overlap):
+                    colour_mode = error_map.get("colour_mode", "closest_distance")
+                    mean = error_map.get("mean")
+                    if colour_mode == "difference_from_mean" and mean is not None and np.isfinite(mean):
+                        values = distances[in_overlap] - float(mean)
+                        limit = max(float(np.max(np.abs(values))), np.finfo(float).eps)
+                        colour_kwargs = {"cmap": export_options.get("heatmap_colormap", "coolwarm"), "vmin": -limit, "vmax": limit}
+                        colourbar_label = f"Closest-reference distance minus mean ({unit})"
+                    else:
+                        values = distances[in_overlap]
+                        colour_kwargs = {"cmap": export_options.get("heatmap_colormap", "turbo"), "vmin": 0.0, "vmax": cutoff}
+                        colourbar_label = f"Unsigned distance to reference ({unit})"
+                    scatter = axes.scatter(
+                        points[in_overlap, 0], points[in_overlap, 1], points[in_overlap, 2], c=values,
+                        marker=".", s=point_size,
+                        label=display_label,
+                        zorder=zorder, rasterized=rasterize_points, axlim_clip=True, **colour_kwargs,
+                    )
+                    figure.colorbar(
+                        scatter, ax=axes, label=colourbar_label, pad=0.1,
+                        shrink=float(export_options.get("colourbar_height", 1.0)),
+                    )
+                if np.any(~in_overlap):
+                    axes.scatter(
+                        points[~in_overlap, 0], points[~in_overlap, 1], points[~in_overlap, 2], c="0.55",
+                        marker=".", s=point_size, label=f"{display_label} outside cutoff", zorder=zorder,
+                        rasterized=rasterize_points, axlim_clip=True,
+                    )
+                error_maps_rendered += 1
+                continue
+            scatter_kwargs = {
+                "marker": ".", "s": point_size,
+                "label": display_label, "zorder": zorder,
+                "rasterized": rasterize_points, "axlim_clip": True,
+            }
+            color_column = settings.get("color_col")
+            if color_column and color_column in df.columns:
+                axes.scatter(points[:, 0], points[:, 1], points[:, 2], c=df[color_column], cmap=cm.viridis,
+                             **scatter_kwargs)
+            else:
+                axes.scatter(points[:, 0], points[:, 1], points[:, 2],
+                             c=settings.get("base_color", "b"), **scatter_kwargs)
+
+        if height_mappable is not None:
+            unit = visible[0]["settings"].get("distance_unit", "mm")
+            figure.colorbar(
+                height_mappable, ax=axes, label=f"Height / Z coordinate ({unit})", pad=0.1,
+                shrink=float(export_options.get("colourbar_height", 1.0)),
+            )
+
+        axes.set_xlabel(export_options.get("x_label", "X"))
+        axes.set_ylabel(export_options.get("y_label", "Y"))
+        # Matplotlib's 3-D z-axis label can be clipped when an export also
+        # has a colorbar.  Draw the export label at figure level so it remains
+        # visible for every camera angle and bounding-box setting.
+        z_label = export_options.get("z_label", "Z")
+        axes.set_zlabel("")
+        figure.text(0.105, 0.5, z_label, rotation=90, va="center", ha="center")
+        try:
+            axes.set_box_aspect(view_state["box_aspect"])
+        except (AttributeError, KeyError):
+            pass
+        try:
+            axes.view_init(elev=view_state["elev"], azim=view_state["azim"], roll=view_state["roll"] or 0.0)
+        except TypeError:  # Older Matplotlib without roll support.
+            axes.view_init(elev=view_state["elev"], azim=view_state["azim"])
+        axes.set_xlim3d(view_state["xlim"])
+        axes.set_ylim3d(view_state["ylim"])
+        axes.set_zlim3d(view_state["zlim"])
+        handles, labels = axes.get_legend_handles_labels()
+        if labels and export_options.get("show_legend", True):
+            # ``loc`` anchors the legend inside the axes; do not use a figure
+            # bounding box, which is what previously allowed it to sit above
+            # the plot when constrained layout made space for it.
+            legend_position = export_options.get("legend_position", "upper right")
+            legend_placement = export_options.get(
+                "legend_placement",
+                "best" if legend_position == "inside_best" else "inside",
+            )
+            legend_kwargs = {
+                "loc": legend_position,
+                "title": export_options.get("legend_title") or None,
+                "borderaxespad": 0.5,
+                "markerscale": float(np.sqrt(
+                    float(export_options.get("legend_point_size", 16.0)) / max(point_size, np.finfo(float).eps)
+                )),
+            }
+            inside_anchors = {
+                # In a 3-D export the visible data cube sits well below the
+                # top of the underlying rectangular axes.  The upper anchors
+                # deliberately use the white wedges alongside that cube,
+                # rather than the misleading empty strip above it.
+                "upper right": (0.98, 0.80), "upper left": (0.02, 0.80),
+                "lower right": (0.98, 0.02), "lower left": (0.02, 0.02),
+            }
+            outside_anchors = {
+                "upper right": (1.02, 0.95, "upper left"),
+                "upper left": (-0.02, 0.95, "upper right"),
+                "lower right": (1.02, 0.05, "lower left"),
+                "lower left": (-0.02, 0.05, "lower right"),
+            }
+            if legend_placement == "outside":
+                x, y, outside_loc = outside_anchors.get(legend_position, outside_anchors["upper right"])
+                legend_kwargs["loc"] = outside_loc
+                legend_kwargs["bbox_to_anchor"] = (x, y)
+            else:
+                anchor = inside_anchors.get(legend_position, inside_anchors["upper right"])
+                legend_kwargs["bbox_to_anchor"] = anchor
+            if legend_placement == "best":
+                # A 3-D axis fills a large rectangular canvas, while the
+                # projected data cube usually occupies its middle.  Matplotlib
+                # loc="best" chooses the empty rectangle above that cube;
+                # this anchor intentionally puts the legend over its upper
+                # right area instead.
+                legend_kwargs["loc"] = "upper right"
+                legend_kwargs["bbox_to_anchor"] = (0.98, 0.80)
+            legend_labels = export_options.get("legend_label_lines", [])
+            rendered_labels = [
+                legend_labels[index] if index < len(legend_labels) else label
+                for index, label in enumerate(labels)
+            ]
+            axes.legend(
+                handles,
+                rendered_labels,
+                **legend_kwargs,
+            )
+        if progress_callback:
+            progress_callback("Writing full-resolution plot export...")
+        figure.savefig(filepath, format=extension.lstrip("."), bbox_inches="tight")
+        self._trim_raster_export_whitespace(filepath)
+        return {"error_maps_rendered": error_maps_rendered}
+
+    def export_full_resolution_plot(self, filepath: str, export_options=None, use_display_points: bool = False,
+                                    completion_title: str = "Full-Resolution Export Complete"):
+        if hasattr(self, "full_resolution_export_worker") and self.full_resolution_export_worker.isRunning():
+            return
+        view_state = self._export_view_state(self.plot_canvas)
+        # Settings are copied so edits cannot change an export that is already
+        # running; data frames themselves remain read-only references.
+        datasets = [{**dataset, "settings": dict(dataset["settings"])} for dataset in self.datasets]
+        self.set_loading_state(True, "Rendering full-resolution plot export without voxel filtering...")
+        self.full_resolution_export_worker = WorkerThread(
+            self.export_full_resolution_background,
+            datasets,
+            filepath,
+            view_state,
+            export_options=export_options,
+            use_display_points=use_display_points,
+            inject_progress=True,
+            inject_cancelled=True,
+        )
+        self.full_resolution_export_worker.progress.connect(lambda message: self.statusBar().showMessage(message))
+
+        def on_finished(result):
+            self.set_loading_state(False, f"Full-resolution plot exported to {filepath}")
+            error_note = (
+                " Active error-map colours were recalculated at full resolution."
+                if result.get("error_maps_rendered", 0) else ""
+            )
+            message = (
+                "The export used the current camera view with display voxel filtering disabled. "
+                if not use_display_points else "The export used the current camera view and display point density. "
+            )
+            message += "The visible plot and saved filter settings were not changed." + error_note
+            QMessageBox.information(
+                self,
+                completion_title,
+                message,
+            )
+
+        def on_error(error):
+            self.set_loading_state(False)
+            if "Cancelled by User" in error:
+                QMessageBox.information(self, "Cancelled", "Full-resolution plot export was cancelled.")
+            else:
+                QMessageBox.critical(self, "Full-Resolution Export Error", f"Failed to export plot:\n{error}")
+
+        self.full_resolution_export_worker.finished.connect(on_finished)
+        self.full_resolution_export_worker.error.connect(on_error)
+        self.full_resolution_export_worker.start()
+
+    def export_configured_plot(self, filepath: str, full_resolution: bool):
+        self.export_full_resolution_plot(
+            filepath,
+            export_options=self.control_panel.get_export_options(),
+            use_display_points=not full_resolution,
+            completion_title="Export Complete",
+        )
+
+    def preview_export_settings(self):
+        """Render the configured appearance at display density for quick iteration."""
+        import tempfile
+
+        handle, filepath = tempfile.mkstemp(suffix=".png", prefix="point_cloud_export_preview_")
+        os.close(handle)
+        view_state = self._export_view_state(self.plot_canvas)
+        datasets = [{**dataset, "settings": dict(dataset["settings"])} for dataset in self.datasets]
+        self.set_loading_state(True, "Rendering export preview...")
+        self.export_preview_worker = WorkerThread(
+            self.export_full_resolution_background,
+            datasets,
+            filepath,
+            view_state,
+            export_options=self.control_panel.get_export_options(),
+            use_display_points=True,
+            inject_progress=True,
+            inject_cancelled=True,
+        )
+        self.export_preview_worker.progress.connect(lambda message: self.statusBar().showMessage(message))
+
+        def on_finished(_result):
+            self.set_loading_state(False, "Export preview ready.")
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Export Preview (Display Resolution)")
+            preview = QLabel()
+            pixmap = QPixmap(filepath)
+            preview.setPixmap(pixmap.scaled(1000, 800, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation))
+            preview_layout = QVBoxLayout(dialog)
+            preview_layout.addWidget(preview)
+            dialog.exec()
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+
+        def on_error(error):
+            self.set_loading_state(False)
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+            QMessageBox.critical(self, "Export Preview Error", f"Failed to render preview:\n{error}")
+
+        self.export_preview_worker.finished.connect(on_finished)
+        self.export_preview_worker.error.connect(on_error)
+        self.export_preview_worker.start()
             
     def save_data_background(self, dataset):
         df = dataset["df"]
@@ -1218,7 +1711,9 @@ class MainWindow(QMainWindow):
 
         def centre_and_save():
             centred, centroid = centre_point_cloud(dataset["df"])
-            filepath = save_centred_point_cloud(centred, dataset["filepath"], centroid)
+            filepath = save_centred_point_cloud(
+                centred, dataset["filepath"], centroid, dataset["settings"].get("distance_unit", "mm")
+            )
             return filepath, centroid
 
         self.centre_worker = WorkerThread(centre_and_save)
@@ -1231,7 +1726,7 @@ class MainWindow(QMainWindow):
                 "Centred Copy Created",
                 "The original file was not changed.\n\n"
                 f"Saved copy:\n{filepath}\n\n"
-                "Original centroid subtracted (data units):\n"
+                f"Original centroid subtracted ({dataset['settings'].get('distance_unit', 'mm')}):\n"
                 f"X={centroid[0]:.3f}, Y={centroid[1]:.3f}, Z={centroid[2]:.3f}",
             )
 

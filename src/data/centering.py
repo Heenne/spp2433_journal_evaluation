@@ -42,7 +42,8 @@ def _ply_property_type(dtype: np.dtype) -> Tuple[str, np.dtype]:
     raise ValueError(f"PLY export does not support non-numeric column dtype {dtype}.")
 
 
-def save_centred_point_cloud(df: pd.DataFrame, original_filepath: str, centroid: np.ndarray) -> str:
+def save_centred_point_cloud(df: pd.DataFrame, original_filepath: str, centroid: np.ndarray,
+                             distance_unit: str = "mm") -> str:
     """Save a centred copy in the source format, preserving extra numeric PLY columns."""
     output_filepath = get_centred_filename(original_filepath)
     extension = os.path.splitext(original_filepath)[1].lower()
@@ -68,7 +69,7 @@ def save_centred_point_cloud(df: pd.DataFrame, original_filepath: str, centroid:
     header = [
         "ply",
         "format binary_little_endian 1.0",
-        "comment centred copy; original XYZ centroid (data units): "
+        f"comment centred copy; original XYZ centroid ({str(distance_unit).strip() or 'mm'}): "
         + " ".join(f"{value:.9g}" for value in centroid),
         f"element vertex {len(records)}",
     ]

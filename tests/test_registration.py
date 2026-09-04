@@ -6,6 +6,7 @@ from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
 from src.utils.registration import (
+    _projected_xy_overlap_masks,
     automatic_registration,
     calculate_cloud_error,
     global_automatic_registration,
@@ -52,6 +53,7 @@ class LocalFineAlignmentTests(unittest.TestCase):
         self.assertLess(correspondence_rms, 0.10, {**result, "nearest_rms": nearest_rms})
         self.assertLessEqual(result["optimizer"]["translation_correction"], 4.0)
         self.assertLessEqual(result["optimizer"]["rotation_correction_degrees"], 8.0)
+        np.testing.assert_allclose(result["optimizer"]["pivot"], source.mean(axis=0))
 
     def test_keeps_an_already_correct_manual_pose(self):
         source = self._source_cloud()
@@ -83,6 +85,20 @@ class LocalFineAlignmentTests(unittest.TestCase):
         self.assertEqual(correction[1:], [0.0, 0.0])
         self.assertEqual(result["optimizer"]["rotation_correction_vector_degrees"], [0.0, 0.0, 0.0])
 
+    def test_projected_footprint_excludes_scan_extensions_before_3d_matching(self):
+        x, y = np.meshgrid(np.linspace(-10.0, 10.0, 101), np.linspace(-5.0, 5.0, 31))
+        source = np.column_stack((x.ravel(), y.ravel(), np.zeros(x.size)))
+        target = source.copy()
+        target[:, 0] += 10.0
+
+        source_mask, target_mask, details = _projected_xy_overlap_masks(source, target, voxel_size=0.1)
+
+        self.assertTrue(details["projected_overlap_used"])
+        self.assertLess(source_mask.mean(), 0.6)
+        self.assertLess(target_mask.mean(), 0.6)
+        self.assertTrue(np.all(source[source_mask, 0] >= -0.3))
+        self.assertTrue(np.all(target[target_mask, 0] <= 10.3))
+
     def test_surface_error_excludes_non_overlapping_source_points(self):
         source = self._frame(np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
         reference = self._frame(np.array([[0.1, 0.0, 0.0], [1.2, 0.0, 0.0]]))
@@ -91,8 +107,26 @@ class LocalFineAlignmentTests(unittest.TestCase):
 
         self.assertEqual(report["overlap_points"], 2)
         self.assertEqual(report["non_overlap_points"], 1)
+        self.assertAlmostEqual(report["minimum"], 0.1)
         self.assertAlmostEqual(report["mean"], 0.15)
         self.assertAlmostEqual(report["rmse"], np.sqrt((0.1 ** 2 + 0.2 ** 2) / 2.0))
+        self.assertEqual(report["unit"], "mm")
+
+    def test_surface_error_excludes_partial_scan_extension_from_maximum(self):
+        # The points beyond X=89 are close enough to the reference edge to
+        # pass a generous distance cutoff, but they are outside the common
+        # footprint and must not determine the maximum error.
+        source = self._frame(np.column_stack((np.arange(110, dtype=float), np.zeros(110), np.zeros(110))))
+        reference = self._frame(np.column_stack((np.arange(90, dtype=float), np.zeros(90), np.zeros(90))))
+
+        report = calculate_cloud_error(source, reference, max_distance=25.0, max_analysis_points=0)
+
+        self.assertTrue(report["projected_footprint_used"])
+        self.assertGreaterEqual(report["projected_non_overlap_points"], 2)
+        self.assertEqual(report["maximum"], 0.0)
+
+        report_metres = calculate_cloud_error(source, reference, max_distance=0.5, max_analysis_points=0, distance_unit="m")
+        self.assertEqual(report_metres["unit"], "m")
 
     def test_surface_error_can_return_pointwise_colours_for_the_analysed_points(self):
         source = self._frame(np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]]))

@@ -57,19 +57,30 @@ class PlotCanvas(FigureCanvas):
     def set_standard_view(self, view_name: str):
         """Set a named orthographic-style inspection direction without redrawing data."""
         views = {
-            "positive_x": (0.0, 0.0),
-            "negative_x": (0.0, 180.0),
-            "positive_y": (0.0, 90.0),
-            "negative_y": (0.0, -90.0),
-            "top": (90.0, -90.0),
-            "bottom": (-90.0, -90.0),
-            "isometric": (30.0, -60.0),
+            "positive_x": (0.0, 0.0, 0.0),
+            "negative_x": (0.0, 180.0, 0.0),
+            "positive_y": (0.0, 90.0, 0.0),
+            "negative_y": (0.0, -90.0, 0.0),
+            "top": (90.0, -90.0, 0.0),
+            "bottom": (-90.0, -90.0, 0.0),
+            "isometric": (30.0, -60.0, 0.0),
+            # User-selected diagonal inspection orientation.
+            "diagonal_negative_x_positive_y_positive_z": (-30.0, -45.0, 180.0),
         }
         if view_name not in views:
             return
-        elev, azim = views[view_name]
-        self.axes.view_init(elev=elev, azim=azim)
+        elev, azim, roll = views[view_name]
+        self.axes.view_init(elev=elev, azim=azim, roll=roll)
         self.draw_idle()
+
+    def set_camera_angles(self, elevation: float, azimuth: float, roll: float = 0.0):
+        """Set explicit Matplotlib camera orientation angles in degrees."""
+        self.axes.view_init(elev=float(elevation), azim=float(azimuth), roll=float(roll))
+        self.draw_idle()
+
+    def camera_angles(self) -> tuple[float, float, float]:
+        """Return the currently active elevation, azimuth, and roll in degrees."""
+        return float(self.axes.elev), float(self.axes.azim), float(getattr(self.axes, "roll", 0.0))
 
     def rotate_camera_around_vertical(self, degrees: float):
         """Rotate the current inspection direction in 90-degree increments."""
@@ -180,6 +191,7 @@ class PlotCanvas(FigureCanvas):
             
             if error_map is not None:
                 cutoff = float(error_map["cutoff"])
+                distance_unit = error_map.get("unit", "mm")
                 in_overlap = np.isfinite(distances)
                 point_size = 8
                 if np.any(in_overlap):
@@ -189,17 +201,17 @@ class PlotCanvas(FigureCanvas):
                         colour_values = distances[in_overlap] - float(mean)
                         colour_limit = max(float(np.max(np.abs(colour_values))), np.finfo(float).eps)
                         colour_kwargs = {"cmap": "coolwarm", "vmin": -colour_limit, "vmax": colour_limit}
-                        colourbar_label = "Closest-reference distance minus mean (data units)"
+                        colourbar_label = f"Closest-reference distance minus mean ({distance_unit})"
                         mean_marker = 0.0
                     else:
                         colour_values = distances[in_overlap]
                         colour_kwargs = {"cmap": "turbo", "vmin": 0.0, "vmax": cutoff}
-                        colourbar_label = "Unsigned distance to reference (data units)"
+                        colourbar_label = f"Unsigned distance to reference ({distance_unit})"
                         mean_marker = mean
                     scatter = self.axes.scatter(
                         x[in_overlap], y[in_overlap], z[in_overlap], c=colour_values,
                         marker='.', s=point_size, zorder=zorder, **colour_kwargs,
-                        label=f"{name} error",
+                        label=f"{name} error", axlim_clip=True,
                     )
                     cb = self.fig.colorbar(
                         scatter, ax=self.axes, label=colourbar_label, pad=0.1
@@ -212,14 +224,14 @@ class PlotCanvas(FigureCanvas):
                 if np.any(~in_overlap):
                     self.axes.scatter(
                         x[~in_overlap], y[~in_overlap], z[~in_overlap], c="0.55", marker='.', s=point_size,
-                        label=f"{name} outside cutoff", zorder=zorder,
+                        label=f"{name} outside cutoff", zorder=zorder, axlim_clip=True,
                     )
                 if error_map.get("highlight_above_mean") and error_map.get("mean") is not None:
                     above_mean = in_overlap & (distances > float(error_map["mean"]))
                     if np.any(above_mean):
                         self.axes.scatter(
                             x[above_mean], y[above_mean], z[above_mean], c="red", marker='.', s=point_size,
-                            label=f"{name} > mean error", zorder=zorder + 1,
+                            label=f"{name} > mean error", zorder=zorder + 1, axlim_clip=True,
                         )
                 error_map_shown = True
                 continue
@@ -230,14 +242,17 @@ class PlotCanvas(FigureCanvas):
             if color_col and color_col in df.columns:
                 c = df[color_col]
                 scatter = self.axes.scatter(
-                    x, y, z, c=c, cmap=cm.viridis, marker='.', s=10, label=name, zorder=zorder
+                    x, y, z, c=c, cmap=cm.viridis, marker='.', s=10, label=name, zorder=zorder,
+                    axlim_clip=True,
                 )
                 if not colorbar_added:
                     cb = self.fig.colorbar(scatter, ax=self.axes, label=color_col, pad=0.1)
                     self.colorbars.append(cb)
                     colorbar_added = True
             else:
-                self.axes.scatter(x, y, z, c=base_color, marker='.', s=10, label=name, zorder=zorder)
+                self.axes.scatter(
+                    x, y, z, c=base_color, marker='.', s=10, label=name, zorder=zorder, axlim_clip=True
+                )
             
         self.axes.set_xlabel('X')
         self.axes.set_ylabel('Y')

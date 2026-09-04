@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QSlider, QComboBox, 
     QCheckBox, QPushButton, QGroupBox, QHBoxLayout, QFileDialog, QListWidget, QListWidgetItem,
-    QDoubleSpinBox, QSpinBox, QTabWidget, QFormLayout, QInputDialog, QMessageBox, QScrollArea, QGridLayout
+    QDoubleSpinBox, QSpinBox, QTabWidget, QFormLayout, QInputDialog, QMessageBox, QScrollArea, QGridLayout,
+    QLineEdit, QTextEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -15,6 +16,9 @@ class ControlPanel(QWidget):
     visibility_toggled = pyqtSignal(int, bool)
     settings_changed = pyqtSignal()
     export_requested = pyqtSignal(str)
+    export_full_resolution_requested = pyqtSignal(str)
+    export_configured_requested = pyqtSignal(str, bool)
+    export_preview_requested = pyqtSignal()
     save_data_requested = pyqtSignal()
     centre_data_requested = pyqtSignal()
     run_icp_requested = pyqtSignal(int, int, float, str) # source_idx, target_idx, max_dist, method
@@ -25,6 +29,8 @@ class ControlPanel(QWidget):
     error_map_colour_mode_changed = pyqtSignal(str)
     camera_view_requested = pyqtSignal(str)
     camera_rotate_requested = pyqtSignal(float)
+    camera_angles_requested = pyqtSignal(float, float, float)
+    camera_angles_read_requested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -138,6 +144,17 @@ class ControlPanel(QWidget):
         camera_layout.addWidget(camera_button("−X", "negative_x", "Look along the negative X axis."), 1, 2)
         camera_layout.addWidget(camera_button("+Y", "positive_y", "Look along the positive Y axis (back view)."), 2, 1)
         camera_layout.addWidget(camera_button("Bottom (−Z)", "bottom", "Look up the negative Z axis."), 3, 1)
+        camera_layout.addWidget(
+            camera_button(
+                "Diagonal (−X,+Y,+Z)",
+                "diagonal_negative_x_positive_y_positive_z",
+                "User-selected diagonal view: elevation −30°, azimuth −45°, roll 180°.",
+            ),
+            4,
+            0,
+            1,
+            3,
+        )
 
         rotate_left = QPushButton("↺ 90°")
         rotate_left.setToolTip("Rotate the camera 90 degrees counter-clockwise around Z.")
@@ -146,19 +163,41 @@ class ControlPanel(QWidget):
         rotate_right = QPushButton("↻ 90°")
         rotate_right.setToolTip("Rotate the camera 90 degrees clockwise around Z.")
         rotate_right.clicked.connect(lambda: self.camera_rotate_requested.emit(90.0))
-        camera_layout.addWidget(rotate_left, 4, 0)
-        camera_layout.addWidget(isometric, 4, 1)
-        camera_layout.addWidget(rotate_right, 4, 2)
+        camera_layout.addWidget(rotate_left, 5, 0)
+        camera_layout.addWidget(isometric, 5, 1)
+        camera_layout.addWidget(rotate_right, 5, 2)
+        self.camera_elevation_spin = QDoubleSpinBox()
+        self.camera_azimuth_spin = QDoubleSpinBox()
+        self.camera_roll_spin = QDoubleSpinBox()
+        for spin, minimum, maximum in (
+            (self.camera_elevation_spin, -90.0, 90.0),
+            (self.camera_azimuth_spin, -360.0, 360.0),
+            (self.camera_roll_spin, -180.0, 180.0),
+        ):
+            spin.setRange(minimum, maximum)
+            spin.setDecimals(1)
+            spin.setSingleStep(1.0)
+            spin.setSuffix("°")
+        self.camera_elevation_spin.setValue(30.0)
+        self.camera_azimuth_spin.setValue(-60.0)
+        self.camera_roll_spin.setValue(0.0)
+        self.btn_apply_camera_angles = QPushButton("Apply Camera Angles")
+        self.btn_apply_camera_angles.clicked.connect(self._on_apply_camera_angles_clicked)
+        self.btn_read_camera_angles = QPushButton("Read Current View")
+        self.btn_read_camera_angles.setToolTip(
+            "Copies the current interactive 3-D camera orientation into the fields above."
+        )
+        self.btn_read_camera_angles.clicked.connect(self.camera_angles_read_requested.emit)
+        camera_layout.addWidget(QLabel("Elevation:"), 6, 0)
+        camera_layout.addWidget(self.camera_elevation_spin, 6, 1)
+        camera_layout.addWidget(QLabel("Azimuth:"), 7, 0)
+        camera_layout.addWidget(self.camera_azimuth_spin, 7, 1)
+        camera_layout.addWidget(QLabel("Roll:"), 8, 0)
+        camera_layout.addWidget(self.camera_roll_spin, 8, 1)
+        camera_layout.addWidget(self.btn_read_camera_angles, 9, 0)
+        camera_layout.addWidget(self.btn_apply_camera_angles, 9, 1, 1, 2)
         camera_group.setLayout(camera_layout)
         data_layout.addWidget(camera_group)
-        
-        export_group = QGroupBox("Export")
-        export_layout = QVBoxLayout()
-        self.btn_export = QPushButton("Export Plot")
-        self.btn_export.clicked.connect(self._on_export_clicked)
-        export_layout.addWidget(self.btn_export)
-        export_group.setLayout(export_layout)
-        data_layout.addWidget(export_group)
         
         data_layout.addStretch()
         tab_data.setLayout(data_layout)
@@ -176,7 +215,7 @@ class ControlPanel(QWidget):
         
         self.voxel_spin = QDoubleSpinBox()
         self.voxel_spin.setRange(0.001, 1000.0)
-        self.voxel_spin.setToolTip("Size of the voxel grid cell in data units. Auto-calculated on load based on dataset bounds.")
+        self.voxel_spin.setToolTip("Size of the voxel grid cell in mm. Auto-calculated on load based on dataset bounds.")
         self.voxel_spin.setValue(0.1)
         self.voxel_spin.setSingleStep(0.05)
         self.voxel_spin.setDecimals(3)
@@ -267,6 +306,8 @@ class ControlPanel(QWidget):
         legacy_alignment_layout = QVBoxLayout()
         tab_fine_alignment = QWidget()
         fine_alignment_layout = QVBoxLayout()
+        tab_export = QWidget()
+        export_tab_layout = QVBoxLayout()
         
         # Manual Transform
         manual_group = QGroupBox("Manual Transform (Selected Dataset)")
@@ -313,6 +354,11 @@ class ControlPanel(QWidget):
             "Uniform scale applied before rotation and translation. Use this when one cloud is in metres "
             "and the reference is in millimetres (for example, 1000), then run bounded manual fine alignment."
         )
+        self.distance_unit_combo = QComboBox()
+        self.distance_unit_combo.setEditable(True)
+        self.distance_unit_combo.addItems(["mm", "µm", "cm", "m", "in"])
+        self.distance_unit_combo.setCurrentText("mm")
+        self.distance_unit_combo.currentTextChanged.connect(self._on_distance_unit_changed)
             
         self.rx_spin = QDoubleSpinBox()
         self.ry_spin = QDoubleSpinBox()
@@ -322,13 +368,18 @@ class ControlPanel(QWidget):
             spin.setDecimals(2)
             spin.setSingleStep(1.0)
             
+        manual_form.addRow("Distance unit:", self.distance_unit_combo)
         manual_form.addRow("Uniform scale:", self.scale_spin)
-        manual_form.addRow("Translate X (units):", self.tx_spin)
-        manual_form.addRow("Translate Y (units):", self.ty_spin)
-        manual_form.addRow("Translate Z (units):", self.tz_spin)
+        self.tx_label = QLabel()
+        self.ty_label = QLabel()
+        self.tz_label = QLabel()
+        manual_form.addRow(self.tx_label, self.tx_spin)
+        manual_form.addRow(self.ty_label, self.ty_spin)
+        manual_form.addRow(self.tz_label, self.tz_spin)
         manual_form.addRow("Rotate X (deg):", self.rx_spin)
         manual_form.addRow("Rotate Y (deg):", self.ry_spin)
         manual_form.addRow("Rotate Z (deg):", self.rz_spin)
+        self._refresh_distance_unit_labels()
         
         # Invert axis options
         invert_layout = QHBoxLayout()
@@ -433,14 +484,14 @@ class ControlPanel(QWidget):
             return spin
 
         translation_tooltip = (
-            "Independent plus/minus correction from the manual pose at the overlap pivot, in data units. "
+            "Independent plus/minus correction from the manual pose at the selected cloud's current centroid, in mm. "
             "Set this to 0 to lock the axis."
         )
         self.auto_tx_limit_spin = component_limit(10.0, 1_000_000.0, 6, "", translation_tooltip)
         self.auto_ty_limit_spin = component_limit(10.0, 1_000_000.0, 6, "", translation_tooltip)
         self.auto_tz_limit_spin = component_limit(10.0, 1_000_000.0, 6, "", translation_tooltip)
         rotation_tooltip = (
-            "Independent plus/minus XYZ Euler-angle correction from the manual pose. "
+            "Independent plus/minus XYZ Euler-angle correction around the selected cloud's current centroid. "
             "Set this to 0 to lock the axis."
         )
         self.auto_rx_limit_spin = component_limit(5.0, 30.0, 1, " deg", rotation_tooltip)
@@ -460,7 +511,8 @@ class ControlPanel(QWidget):
         auto_info = QLabel(
             "First make a rough manual placement, then optimize it here. The optimizer starts exactly at that pose, "
             "changes only translation and rotation within the six limits above, and retains the manual pose unless the "
-            "frozen two-sided overlap improves measurably. Global PCA/centre-of-gravity search is intentionally not used. "
+            "frozen two-sided overlap improves measurably. For partial scans it first limits matching to the current shared X-Y footprint, "
+            "so scan extensions with no counterpart do not steer the fit. Global PCA/centre-of-gravity search is intentionally not used. "
             "Both clouds must use the same units: set Uniform scale first if, for example, one file is in metres "
             "and the reference is in millimetres."
         )
@@ -470,9 +522,16 @@ class ControlPanel(QWidget):
         auto_group.setLayout(auto_layout)
         fine_alignment_layout.addWidget(auto_group)
 
-        comparison_group = QGroupBox("Surface Error (Selected -> Reference)")
+        comparison_group = QGroupBox("Surface Error (Source -> Reference)")
         comparison_layout = QFormLayout()
+        self.comparison_source_combo = QComboBox()
         self.comparison_target_combo = QComboBox()
+        self.comparison_source_combo.currentIndexChanged.connect(
+            lambda _: self._sync_comparison_selectors(source_changed=True)
+        )
+        self.comparison_target_combo.currentIndexChanged.connect(
+            lambda _: self._sync_comparison_selectors(source_changed=False)
+        )
         self.comparison_cutoff_spin = QDoubleSpinBox()
         self.comparison_cutoff_spin.setRange(0.000001, 1_000_000.0)
         self.comparison_cutoff_spin.setValue(1.0)
@@ -494,7 +553,7 @@ class ControlPanel(QWidget):
         self.comparison_show_map_check = QCheckBox("Show pointwise error colour map after calculation")
         self.comparison_show_map_check.setChecked(True)
         self.comparison_show_map_check.setToolTip(
-            "Colours every analysed selected-cloud point by its distance to the reference. "
+            "Colours every analysed source-cloud point by its distance to the reference. "
             "Points outside the overlap cutoff are shown in grey."
         )
         self.comparison_highlight_mean_check = QCheckBox("Highlight errors above the mean in red")
@@ -505,6 +564,7 @@ class ControlPanel(QWidget):
         self.comparison_summary = QLabel("No comparison calculated yet.")
         self.comparison_summary.setWordWrap(True)
         self.comparison_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        comparison_layout.addRow("Source:", self.comparison_source_combo)
         comparison_layout.addRow("Reference:", self.comparison_target_combo)
         comparison_layout.addRow("Overlap / error cutoff:", self.comparison_cutoff_spin)
         comparison_layout.addRow("Maximum source points:", self.comparison_points_spin)
@@ -514,6 +574,114 @@ class ControlPanel(QWidget):
         comparison_layout.addRow("Last result:", self.comparison_summary)
         comparison_group.setLayout(comparison_layout)
         fine_alignment_layout.addWidget(comparison_group)
+
+        export_options_group = QGroupBox("Export Appearance")
+        export_options_layout = QFormLayout()
+        self.export_heatmap_check = QCheckBox("Use active error heatmap")
+        self.export_heatmap_check.setChecked(True)
+        self.export_heightmap_check = QCheckBox("Height map (Z coordinate)")
+        self.export_heightmap_check.setToolTip(
+            "Colour all exported points by their transformed Z coordinate with one shared colour scale. "
+            "This takes priority over the error heatmap and reveals surface curvature and drilled holes."
+        )
+        self.export_heatmap_check.toggled.connect(
+            lambda checked: self.export_heightmap_check.setChecked(False) if checked else None
+        )
+        self.export_heightmap_check.toggled.connect(
+            lambda checked: self.export_heatmap_check.setChecked(False) if checked else None
+        )
+        self.export_heatmap_colormap_combo = QComboBox()
+        self.export_heatmap_colormap_combo.addItems(
+            ["turbo", "viridis", "plasma", "inferno", "magma", "cividis", "coolwarm"]
+        )
+        self.export_heightmap_colormap_combo = QComboBox()
+        self.export_heightmap_colormap_combo.addItems(
+            ["viridis", "turbo", "plasma", "inferno", "magma", "cividis", "coolwarm"]
+        )
+        self.export_colourbar_height_spin = QDoubleSpinBox()
+        self.export_colourbar_height_spin.setRange(0.1, 1.0)
+        self.export_colourbar_height_spin.setValue(1.0)
+        self.export_colourbar_height_spin.setSingleStep(0.05)
+        self.export_colourbar_height_spin.setDecimals(2)
+        self.export_colourbar_height_spin.setToolTip("Colour-bar height as a fraction of the plot height.")
+        self.export_point_size_spin = QDoubleSpinBox()
+        self.export_point_size_spin.setRange(0.1, 20.0)
+        self.export_point_size_spin.setValue(2.0)
+        self.export_point_size_spin.setSingleStep(0.1)
+        self.export_point_size_spin.setDecimals(1)
+        self.export_point_size_spin.setToolTip(
+            "Scatter marker area in points². Reduce this (for example to 0.3–0.6) to reveal small holes "
+            "in dense full-resolution clouds."
+        )
+        self.export_x_axis_name = QLineEdit("X")
+        self.export_y_axis_name = QLineEdit("Y")
+        self.export_z_axis_name = QLineEdit("Z")
+        self.export_show_legend_check = QCheckBox("Show legend")
+        self.export_show_legend_check.setChecked(True)
+        self.export_legend_point_size_spin = QDoubleSpinBox()
+        self.export_legend_point_size_spin.setRange(0.1, 100.0)
+        self.export_legend_point_size_spin.setValue(16.0)
+        self.export_legend_point_size_spin.setSingleStep(1.0)
+        self.export_legend_point_size_spin.setDecimals(1)
+        self.export_legend_point_size_spin.setToolTip(
+            "Legend scatter-marker area in points², independent of the point size in the plot."
+        )
+        self.export_legend_placement_combo = QComboBox()
+        self.export_legend_placement_combo.addItem("Inside plot", "inside")
+        self.export_legend_placement_combo.addItem("Outside plot", "outside")
+        self.export_legend_placement_combo.addItem("Best position (inside)", "best")
+        self.export_legend_position_combo = QComboBox()
+        self.export_legend_position_combo.addItem("Upper right", "upper right")
+        self.export_legend_position_combo.addItem("Upper left", "upper left")
+        self.export_legend_position_combo.addItem("Lower right", "lower right")
+        self.export_legend_position_combo.addItem("Lower left", "lower left")
+        self.export_legend_title = QLineEdit()
+        self.export_legend_labels = QTextEdit()
+        self.export_legend_labels.setPlaceholderText(
+            "One label per line, in the same order as the legend.\n"
+            "Line 1 renames the first legend entry; line 2 the second."
+        )
+        self.export_legend_labels.setFixedHeight(72)
+        export_options_layout.addRow("Heatmap:", self.export_heatmap_check)
+        export_options_layout.addRow("Height map:", self.export_heightmap_check)
+        export_options_layout.addRow("Heatmap colours:", self.export_heatmap_colormap_combo)
+        export_options_layout.addRow("Height-map colours:", self.export_heightmap_colormap_combo)
+        export_options_layout.addRow("Colour-bar height:", self.export_colourbar_height_spin)
+        export_options_layout.addRow("Point size:", self.export_point_size_spin)
+        export_options_layout.addRow("X-axis label:", self.export_x_axis_name)
+        export_options_layout.addRow("Y-axis label:", self.export_y_axis_name)
+        export_options_layout.addRow("Z-axis label:", self.export_z_axis_name)
+        export_options_layout.addRow("Legend:", self.export_show_legend_check)
+        export_options_layout.addRow("Legend point size:", self.export_legend_point_size_spin)
+        export_options_layout.addRow("Legend placement:", self.export_legend_placement_combo)
+        export_options_layout.addRow("Legend corner:", self.export_legend_position_combo)
+        export_options_layout.addRow("Legend title:", self.export_legend_title)
+        export_options_layout.addRow("Legend labels:", self.export_legend_labels)
+        export_options_group.setLayout(export_options_layout)
+        export_tab_layout.addWidget(export_options_group)
+
+        export_actions_group = QGroupBox("Export Actions")
+        export_actions_layout = QVBoxLayout()
+        self.btn_preview_export = QPushButton("Preview Export Settings")
+        self.btn_preview_export.setToolTip("Shows a fast preview using the current display resolution.")
+        self.btn_preview_export.clicked.connect(self.export_preview_requested.emit)
+        self.btn_export_configured = QPushButton("Export Current Display")
+        self.btn_export_configured.clicked.connect(lambda: self._on_configured_export_clicked(False))
+        self.btn_export_configured_full = QPushButton("Export Full Resolution (No Voxel)")
+        self.btn_export_configured_full.clicked.connect(lambda: self._on_configured_export_clicked(True))
+        self.btn_save_export_settings = QPushButton("Save Export Settings…")
+        self.btn_save_export_settings.clicked.connect(self._on_save_export_settings_clicked)
+        self.btn_load_export_settings = QPushButton("Load Export Settings…")
+        self.btn_load_export_settings.clicked.connect(self._on_load_export_settings_clicked)
+        export_actions_layout.addWidget(self.btn_preview_export)
+        export_actions_layout.addWidget(self.btn_export_configured)
+        export_actions_layout.addWidget(self.btn_export_configured_full)
+        export_actions_layout.addWidget(self.btn_save_export_settings)
+        export_actions_layout.addWidget(self.btn_load_export_settings)
+        export_actions_group.setLayout(export_actions_layout)
+        export_tab_layout.addWidget(export_actions_group)
+        export_tab_layout.addStretch()
+        tab_export.setLayout(export_tab_layout)
 
         manual_transform_layout.addStretch()
         legacy_alignment_layout.addStretch()
@@ -533,6 +701,7 @@ class ControlPanel(QWidget):
         self.tabs.addTab(scrollable_tab(tab_manual_transform), "Manual Transform")
         self.tabs.addTab(scrollable_tab(tab_legacy_alignment), "Legacy Alignment")
         self.tabs.addTab(scrollable_tab(tab_fine_alignment), "Fine Align & Error")
+        self.tabs.addTab(scrollable_tab(tab_export), "Export")
         
         layout.addWidget(self.tabs)
         self.setLayout(layout)
@@ -570,14 +739,18 @@ class ControlPanel(QWidget):
         self.icp_target_combo.addItem(name)
         self.legacy_global_target_combo.addItem(name)
         self.auto_target_combo.addItem(name)
+        self.comparison_source_combo.addItem(name)
         self.comparison_target_combo.addItem(name)
+        self._sync_comparison_selectors(source_changed=True)
         
     def remove_dataset_from_list(self, idx: int):
         self.dataset_list.takeItem(idx)
         self.icp_target_combo.removeItem(idx)
         self.legacy_global_target_combo.removeItem(idx)
         self.auto_target_combo.removeItem(idx)
+        self.comparison_source_combo.removeItem(idx)
         self.comparison_target_combo.removeItem(idx)
+        self._sync_comparison_selectors(source_changed=True)
 
     def move_dataset_in_list(self, old_idx: int, new_idx: int):
         """Move the list item and every reference selector in the same order."""
@@ -589,6 +762,7 @@ class ControlPanel(QWidget):
             self.icp_target_combo,
             self.legacy_global_target_combo,
             self.auto_target_combo,
+            self.comparison_source_combo,
             self.comparison_target_combo,
         ):
             current_text = combo.currentText()
@@ -597,6 +771,41 @@ class ControlPanel(QWidget):
             combo.insertItem(new_idx, moved_text)
             combo.setCurrentText(current_text)
         self.dataset_list.setCurrentRow(new_idx)
+        self._sync_comparison_selectors(source_changed=True)
+
+    def _sync_comparison_selectors(self, source_changed: bool):
+        """Keep surface-error source/reference selections distinct.
+
+        The currently selected source is disabled in the reference menu and
+        vice versa.  The collision fallback also protects programmatic changes
+        and keeps the Calculate button meaningful with fewer than two clouds.
+        """
+        source_idx = self.comparison_source_combo.currentIndex()
+        target_idx = self.comparison_target_combo.currentIndex()
+        count = self.comparison_source_combo.count()
+        if count >= 2 and source_idx == target_idx:
+            alternative = next(index for index in range(count) if index != source_idx)
+            if source_changed:
+                self.comparison_target_combo.blockSignals(True)
+                self.comparison_target_combo.setCurrentIndex(alternative)
+                self.comparison_target_combo.blockSignals(False)
+            else:
+                self.comparison_source_combo.blockSignals(True)
+                self.comparison_source_combo.setCurrentIndex(alternative)
+                self.comparison_source_combo.blockSignals(False)
+            source_idx = self.comparison_source_combo.currentIndex()
+            target_idx = self.comparison_target_combo.currentIndex()
+
+        for combo, unavailable_idx in (
+            (self.comparison_source_combo, target_idx),
+            (self.comparison_target_combo, source_idx),
+        ):
+            model = combo.model()
+            for index in range(count):
+                item = model.item(index) if hasattr(model, "item") else None
+                if item is not None:
+                    item.setEnabled(count >= 2 and index != unavailable_idx)
+        self.btn_calculate_error.setEnabled(count >= 2)
         
     def _on_selection_changed(self):
         idx = self.dataset_list.currentRow()
@@ -628,11 +837,169 @@ class ControlPanel(QWidget):
         if self.signalsBlocked():
             return
         self.settings_changed.emit()
+
+    def _on_distance_unit_changed(self, _unit: str):
+        if not hasattr(self, "tx_label"):
+            return
+        self._refresh_distance_unit_labels()
+        self._on_settings_changed()
+
+    def _distance_unit(self) -> str:
+        return self.distance_unit_combo.currentText().strip() or "mm"
+
+    def _refresh_distance_unit_labels(self):
+        unit = self._distance_unit()
+        self.tx_label.setText(f"Translate X ({unit}):")
+        self.ty_label.setText(f"Translate Y ({unit}):")
+        self.tz_label.setText(f"Translate Z ({unit}):")
+        self.voxel_spin.setToolTip(
+            f"Size of the voxel grid cell in {unit}. Auto-calculated on load based on dataset bounds."
+        )
         
     def _on_export_clicked(self):
         filepath, _ = QFileDialog.getSaveFileName(self, "Export Plot", "", "PNG Image (*.png);;JPEG Image (*.jpg);;SVG Vector (*.svg)")
         if filepath:
             self.export_requested.emit(filepath)
+
+    def _on_apply_camera_angles_clicked(self):
+        self.camera_angles_requested.emit(
+            self.camera_elevation_spin.value(),
+            self.camera_azimuth_spin.value(),
+            self.camera_roll_spin.value(),
+        )
+
+    def set_camera_angles(self, elevation: float, azimuth: float, roll: float = 0.0):
+        """Show the active Matplotlib camera angles without emitting a change."""
+        for spin, value in (
+            (self.camera_elevation_spin, elevation),
+            (self.camera_azimuth_spin, azimuth),
+            (self.camera_roll_spin, roll),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(float(value))
+            spin.blockSignals(False)
+
+    def _on_export_full_resolution_clicked(self):
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Full Resolution Plot (No Voxel)",
+            "",
+            "PNG Image (*.png);;JPEG Image (*.jpg);;SVG Vector (*.svg)",
+        )
+        if filepath:
+            self.export_full_resolution_requested.emit(filepath)
+
+    def _on_configured_export_clicked(self, full_resolution: bool):
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Plot",
+            "",
+            "PNG Image (*.png);;JPEG Image (*.jpg);;SVG Vector (*.svg)",
+        )
+        if filepath:
+            self.export_configured_requested.emit(filepath, full_resolution)
+
+    def get_export_options(self) -> dict:
+        labels = {}
+        sequential_labels = []
+        for line in self.export_legend_labels.toPlainText().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "=" in line:
+                source, label = (part.strip() for part in line.split("=", 1))
+                if source and label:
+                    labels[source] = label
+            else:
+                sequential_labels.append(line)
+        visible_names = [
+            self.dataset_list.item(index).text()
+            for index in range(self.dataset_list.count())
+            if self.dataset_list.item(index).checkState() == Qt.CheckState.Checked
+        ]
+        for name, label in zip(visible_names, sequential_labels):
+            labels.setdefault(name, label)
+        return {
+            "use_heatmap": self.export_heatmap_check.isChecked(),
+            "use_heightmap": self.export_heightmap_check.isChecked(),
+            "heatmap_colormap": self.export_heatmap_colormap_combo.currentText(),
+            "heightmap_colormap": self.export_heightmap_colormap_combo.currentText(),
+            "colourbar_height": self.export_colourbar_height_spin.value(),
+            "point_size": self.export_point_size_spin.value(),
+            "x_label": self.export_x_axis_name.text() or "X",
+            "y_label": self.export_y_axis_name.text() or "Y",
+            "z_label": self.export_z_axis_name.text() or "Z",
+            "show_legend": self.export_show_legend_check.isChecked(),
+            "legend_point_size": self.export_legend_point_size_spin.value(),
+            "legend_placement": self.export_legend_placement_combo.currentData(),
+            "legend_position": self.export_legend_position_combo.currentData(),
+            "legend_title": self.export_legend_title.text(),
+            "legend_labels": labels,
+            # The renderer uses this ordered list, because an error-map cloud
+            # can contribute more than one legend entry (for example, an
+            # outside-cutoff group).  The name map above is kept so previously
+            # saved settings files remain compatible.
+            "legend_label_lines": sequential_labels,
+        }
+
+    def apply_export_options(self, options: dict):
+        """Load a previously saved export appearance without changing data settings."""
+        self.export_heatmap_check.setChecked(bool(options.get("use_heatmap", True)))
+        self.export_heightmap_check.setChecked(bool(options.get("use_heightmap", False)))
+        self.export_heatmap_colormap_combo.setCurrentText(options.get("heatmap_colormap", "turbo"))
+        self.export_heightmap_colormap_combo.setCurrentText(options.get("heightmap_colormap", "viridis"))
+        self.export_colourbar_height_spin.setValue(float(options.get("colourbar_height", 1.0)))
+        self.export_point_size_spin.setValue(float(options.get("point_size", 2.0)))
+        self.export_x_axis_name.setText(options.get("x_label", "X"))
+        self.export_y_axis_name.setText(options.get("y_label", "Y"))
+        self.export_z_axis_name.setText(options.get("z_label", "Z"))
+        self.export_show_legend_check.setChecked(bool(options.get("show_legend", True)))
+        self.export_legend_point_size_spin.setValue(float(options.get("legend_point_size", 16.0)))
+        position = options.get("legend_position", "upper right")
+        # Version-one export settings used ``inside_best`` as the position.
+        # Keep those files useful after separating placement from corner.
+        placement = options.get("legend_placement", "best" if position == "inside_best" else "inside")
+        if position == "inside_best":
+            position = "upper right"
+        placement_index = self.export_legend_placement_combo.findData(placement)
+        self.export_legend_placement_combo.setCurrentIndex(placement_index if placement_index >= 0 else 0)
+        index = self.export_legend_position_combo.findData(position)
+        self.export_legend_position_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.export_legend_title.setText(options.get("legend_title", ""))
+        labels = options.get("legend_labels", {})
+        if isinstance(labels, dict):
+            self.export_legend_labels.setPlainText("\n".join(str(label) for label in labels.values()))
+
+    def _on_save_export_settings_clicked(self):
+        import json
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Export Settings", "", "Export Settings (*.json);;All Files (*)"
+        )
+        if not filepath:
+            return
+        try:
+            with open(filepath, "w", encoding="utf-8") as output:
+                json.dump(self.get_export_options(), output, indent=2)
+        except OSError as error:
+            QMessageBox.critical(self, "Save Export Settings Error", str(error))
+
+    def _on_load_export_settings_clicked(self):
+        import json
+
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Load Export Settings", "", "Export Settings (*.json);;All Files (*)"
+        )
+        if not filepath:
+            return
+        try:
+            with open(filepath, encoding="utf-8") as source:
+                options = json.load(source)
+            if not isinstance(options, dict):
+                raise ValueError("The selected file does not contain export settings.")
+            self.apply_export_options(options)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            QMessageBox.critical(self, "Load Export Settings Error", str(error))
             
     def _on_run_icp_clicked(self):
         source_idx = self.dataset_list.currentRow()
@@ -667,7 +1034,7 @@ class ControlPanel(QWidget):
             )
 
     def _on_calculate_error_clicked(self):
-        source_idx = self.dataset_list.currentRow()
+        source_idx = self.comparison_source_combo.currentIndex()
         target_idx = self.comparison_target_combo.currentIndex()
         if source_idx >= 0 and target_idx >= 0 and source_idx != target_idx:
             self.calculate_error_requested.emit(
@@ -805,7 +1172,7 @@ class ControlPanel(QWidget):
                   self.invert_x_check, self.invert_y_check, self.invert_z_check,
                   self.zscore_check, self.zscore_spin, self.sor_check, self.sor_k_spin, self.sor_std_spin,
                   self.bbox_check, self.bbox_zmin, self.bbox_zmax, self.voxel_check, self.voxel_spin,
-                  self.scale_spin, self.tx_spin, self.ty_spin, self.tz_spin, self.rx_spin, self.ry_spin, self.rz_spin]:
+                  self.scale_spin, self.distance_unit_combo, self.tx_spin, self.ty_spin, self.tz_spin, self.rx_spin, self.ry_spin, self.rz_spin]:
             w.blockSignals(True)
             
         if "base_color" in config and config["base_color"]:
@@ -832,6 +1199,7 @@ class ControlPanel(QWidget):
         
         self.voxel_check.setChecked(config.get("voxel_enabled", False))
         self.voxel_spin.setValue(config.get("voxel_size", 0.1))
+        self.distance_unit_combo.setCurrentText(config.get("distance_unit", "mm"))
         
         self.current_saved_transforms = config.get("saved_transforms", {"Initial": {
             "scale": config.get("scale", 1.0),
@@ -866,10 +1234,11 @@ class ControlPanel(QWidget):
                   self.invert_x_check, self.invert_y_check, self.invert_z_check,
                   self.zscore_check, self.zscore_spin, self.sor_check, self.sor_k_spin, self.sor_std_spin,
                   self.bbox_check, self.bbox_zmin, self.bbox_zmax, self.voxel_check, self.voxel_spin,
-                  self.scale_spin, self.tx_spin, self.ty_spin, self.tz_spin, self.rx_spin, self.ry_spin, self.rz_spin]:
+                  self.scale_spin, self.distance_unit_combo, self.tx_spin, self.ty_spin, self.tz_spin, self.rx_spin, self.ry_spin, self.rz_spin]:
             w.blockSignals(False)
             
         self.blockSignals(False)
+        self._refresh_distance_unit_labels()
         
     def get_current_settings(self) -> dict:
         current_preset = self.preset_combo.currentText()
@@ -900,6 +1269,7 @@ class ControlPanel(QWidget):
             "bbox_zmax": self.bbox_zmax.value(),
             "voxel_enabled": self.voxel_check.isChecked(),
             "voxel_size": self.voxel_spin.value(),
+            "distance_unit": self._distance_unit(),
             "scale": self.scale_spin.value(),
             "saved_transforms": self.current_saved_transforms,
             "current_transform_name": current_preset,

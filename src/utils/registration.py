@@ -329,8 +329,102 @@ def _local_delta_transform(parameters: np.ndarray, pivot: np.ndarray,
     return transform
 
 
+def _projected_xy_overlap_masks(source_points: np.ndarray, target_points: np.ndarray,
+                                voxel_size: float, exclude_partial_extensions: bool = False) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Select the common footprint of two already roughly aligned clouds.
+
+    A partial survey frequently contains a valid surface plus areas which are
+    simply not present in the reference (and conversely).  A large 3-D
+    correspondence gate is useful while refining a small manual error, but is
+    a poor way to decide which of those areas are comparable: it can let an
+    unmatched edge pull ICP towards the reference.  The current manual pose
+    gives a much more reliable answer.  We therefore intersect robust X--Y
+    envelopes before making the 3-D anchor sets.
+
+    The small padding protects genuine edge points from voxelisation and minor
+    manual error.  It is deliberately based on resolution, not on the allowed
+    correction range, so entering a generous bound cannot turn a non-overlap
+    region back into an optimizer objective.
+    """
+    source_xy = np.asarray(source_points, dtype=np.float64)[:, :2]
+    target_xy = np.asarray(target_points, dtype=np.float64)[:, :2]
+    source_low, source_high = np.percentile(source_xy, (1.0, 99.0), axis=0)
+    target_low, target_high = np.percentile(target_xy, (1.0, 99.0), axis=0)
+    overlap_low = np.maximum(source_low, target_low)
+    overlap_high = np.minimum(source_high, target_high)
+
+    # At most a very small fraction of the current footprint is admitted at
+    # an edge.  This keeps the selection stable for scattered/noisy boundary
+    # points without admitting a large unmatched scan extension.
+    source_span = source_high - source_low
+    target_span = target_high - target_low
+    smaller_span = np.minimum(source_span, target_span)
+    padding = np.maximum(voxel_size * 2.0, smaller_span * 0.01)
+
+    if np.any(overlap_high + padding < overlap_low - padding):
+        # Let the normal 3-D overlap validation produce its helpful error
+        # message when the rough pose is not close enough for an X--Y crop.
+        return np.ones(len(source_points), dtype=bool), np.ones(len(target_points), dtype=bool), {
+            "projected_overlap_used": False,
+            "projected_source_points": int(len(source_points)),
+            "projected_reference_points": int(len(target_points)),
+        }
+
+    lower = overlap_low - padding
+    upper = overlap_high + padding
+    source_mask = np.all((source_xy >= lower) & (source_xy <= upper), axis=1)
+    target_mask = np.all((target_xy >= lower) & (target_xy <= upper), axis=1)
+    source_fraction = float(np.mean(source_mask))
+    target_fraction = float(np.mean(target_mask))
+    # Do not discard a thin boundary strip when the scans already cover almost
+    # all of one another.  Those edge features can be valuable constraints;
+    # footprint cropping is intended for genuinely partial surveys.
+    if not exclude_partial_extensions and min(source_fraction, target_fraction) >= 0.9:
+        return np.ones(len(source_points), dtype=bool), np.ones(len(target_points), dtype=bool), {
+            "projected_overlap_used": False,
+            "projected_source_points": int(len(source_points)),
+            "projected_reference_points": int(len(target_points)),
+            "projected_source_fraction": source_fraction,
+            "projected_reference_fraction": target_fraction,
+        }
+    return source_mask, target_mask, {
+        "projected_overlap_used": True,
+        "projected_source_points": int(np.count_nonzero(source_mask)),
+        "projected_reference_points": int(np.count_nonzero(target_mask)),
+        "projected_source_fraction": source_fraction,
+        "projected_reference_fraction": target_fraction,
+        "projected_xy_padding": float(np.max(padding)),
+    }
+
+
+def _comparison_footprint_masks(source_points: np.ndarray, reference_points: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Return the strict shared footprint used by surface-error statistics."""
+    if min(len(source_points), len(reference_points)) < 20:
+        # An envelope made from only a few isolated samples is not a surface
+        # footprint.  Preserve the conventional cutoff-only result for these
+        # small diagnostic point sets.
+        return (
+            np.ones(len(source_points), dtype=bool),
+            np.ones(len(reference_points), dtype=bool),
+            {"projected_overlap_used": False},
+        )
+    spacings = [
+        value for value in (_estimate_point_spacing(source_points), _estimate_point_spacing(reference_points))
+        if value > 0
+    ]
+    footprint_voxel = max((min(spacings) * 0.25) if spacings else 1e-6, 1e-6)
+    return _projected_xy_overlap_masks(
+        source_points,
+        reference_points,
+        footprint_voxel,
+        exclude_partial_extensions=True,
+    )
+
+
 def _manual_overlap_anchor_sets(source_points: np.ndarray, target_points: np.ndarray,
-                                capture_distance: float) -> tuple[np.ndarray, np.ndarray, dict]:
+                                capture_distance: float,
+                                source_footprint_mask: np.ndarray | None = None,
+                                target_footprint_mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
     """Freeze the area that already overlaps in the manually placed pose.
 
     The reference can be much larger than the project scan.  Restricting both
@@ -339,19 +433,31 @@ def _manual_overlap_anchor_sets(source_points: np.ndarray, target_points: np.nda
     """
     from scipy.spatial import cKDTree
 
-    source_tree = cKDTree(source_points)
-    target_tree = cKDTree(target_points)
+    if source_footprint_mask is None:
+        source_footprint_mask = np.ones(len(source_points), dtype=bool)
+    if target_footprint_mask is None:
+        target_footprint_mask = np.ones(len(target_points), dtype=bool)
+    source_candidates = source_points[np.asarray(source_footprint_mask, dtype=bool)]
+    target_candidates = target_points[np.asarray(target_footprint_mask, dtype=bool)]
+    if min(len(source_candidates), len(target_candidates)) < 20:
+        raise RuntimeError(
+            "The projected X-Y footprints do not contain enough common points for safe fine alignment. "
+            "Adjust the scan manually first."
+        )
+
+    source_tree = cKDTree(source_candidates)
+    target_tree = cKDTree(target_candidates)
     source_distances, _ = target_tree.query(
-        source_points, k=1, distance_upper_bound=capture_distance, workers=-1
+        source_candidates, k=1, distance_upper_bound=capture_distance, workers=-1
     )
     target_distances, _ = source_tree.query(
-        target_points, k=1, distance_upper_bound=capture_distance, workers=-1
+        target_candidates, k=1, distance_upper_bound=capture_distance, workers=-1
     )
     source_mask = np.isfinite(source_distances)
     target_mask = np.isfinite(target_distances)
-    source_anchors = source_points[source_mask]
-    target_anchors = target_points[target_mask]
-    minimum_anchors = max(50, min(500, min(len(source_points), len(target_points)) // 200))
+    source_anchors = source_candidates[source_mask]
+    target_anchors = target_candidates[target_mask]
+    minimum_anchors = max(50, min(500, min(len(source_candidates), len(target_candidates)) // 200))
     if min(len(source_anchors), len(target_anchors)) < minimum_anchors:
         raise RuntimeError(
             "The manual pose does not establish enough nearby overlap for safe fine alignment. "
@@ -360,8 +466,8 @@ def _manual_overlap_anchor_sets(source_points: np.ndarray, target_points: np.nda
     return source_anchors, target_anchors, {
         "source_anchor_points": int(len(source_anchors)),
         "reference_anchor_points": int(len(target_anchors)),
-        "source_anchor_fraction": float(len(source_anchors) / len(source_points)),
-        "reference_anchor_fraction": float(len(target_anchors) / len(target_points)),
+        "source_anchor_fraction": float(len(source_anchors) / len(source_candidates)),
+        "reference_anchor_fraction": float(len(target_anchors) / len(target_candidates)),
     }
 
 
@@ -383,18 +489,20 @@ def _anchor_score(source_points: np.ndarray, target_points: np.ndarray,
         accepted = distances[np.isfinite(distances)]
         overlap = float(len(accepted) / len(distances))
         if not len(accepted):
-            return overlap, float("inf")
+            return overlap, float("inf"), 0
         count = max(1, int(np.ceil(len(accepted) * trim_fraction)))
         trimmed = np.partition(accepted, count - 1)[:count]
-        return overlap, float(np.sqrt(np.mean(np.square(trimmed))))
+        return overlap, float(np.sqrt(np.mean(np.square(trimmed)))), int(len(accepted))
 
-    source_overlap, source_rmse = directional_score(forward)
-    reference_overlap, reference_rmse = directional_score(reverse)
+    source_overlap, source_rmse, source_matches = directional_score(forward)
+    reference_overlap, reference_rmse, reference_matches = directional_score(reverse)
     return {
         "fitness": float(np.sqrt(source_overlap * reference_overlap)),
         "rmse": float(np.sqrt((source_rmse ** 2 + reference_rmse ** 2) / 2.0)),
         "source_overlap": source_overlap,
         "reference_overlap": reference_overlap,
+        "source_matches": source_matches,
+        "reference_matches": reference_matches,
     }
 
 
@@ -402,6 +510,7 @@ def _optimize_local_closest_point_pose(source_points: np.ndarray, target_points:
                                        voxel_size: float, capture_distance: float,
                                        translation_limits: np.ndarray,
                                        rotation_limits_degrees: np.ndarray,
+                                       pivot: np.ndarray,
                                        progress_callback: ProgressCallback,
                                        is_cancelled_callback: CancelledCallback):
     """Iteratively refine the manual pose with a bounded bidirectional objective.
@@ -417,7 +526,9 @@ def _optimize_local_closest_point_pose(source_points: np.ndarray, target_points:
 
     source_points = np.asarray(source_points, dtype=np.float64)
     target_points = np.asarray(target_points, dtype=np.float64)
-    source_pivot = source_points.mean(axis=0)
+    source_pivot = np.asarray(pivot, dtype=np.float64)
+    if source_pivot.shape != (3,) or not np.isfinite(source_pivot).all():
+        raise ValueError("The fine-alignment pivot must contain three finite coordinates.")
     translation_limits = np.asarray(translation_limits, dtype=np.float64)
     rotation_limits_degrees = np.asarray(rotation_limits_degrees, dtype=np.float64)
     translation_search_extent = float(np.max(translation_limits))
@@ -510,6 +621,7 @@ def _optimize_local_closest_point_pose(source_points: np.ndarray, target_points:
         "rotation_correction_degrees": float(np.degrees(
             Rotation.from_euler("xyz", rotation_vector, degrees=True).magnitude()
         )),
+        "pivot": [float(value) for value in source_pivot],
     }
 
 
@@ -564,6 +676,12 @@ def automatic_registration(source_df: pd.DataFrame, target_df: pd.DataFrame,
     )
     source_down_points = np.asarray(source_down.points)
     target_down_points = np.asarray(target_down.points)
+    # Capture the selected cloud's centroid in its *current transformed
+    # coordinates* before crops, voxelisation, or correspondence selection.
+    # The fine correction therefore rotates around the object the user sees
+    # when pressing the button, rather than around the raw-file origin or a
+    # centroid that shifts when non-overlap points are excluded.
+    optimization_pivot = source_points.mean(axis=0)
     translation_search_extent = float(np.max(translation_limits))
     final_tolerance = _final_alignment_tolerance(voxel_size, translation_search_extent)
     # This is a correspondence gate, not an extra motion allowance.  It is
@@ -575,15 +693,37 @@ def automatic_registration(source_df: pd.DataFrame, target_df: pd.DataFrame,
         min(np.linalg.norm(np.radians(rotation_limits_degrees)), np.pi) / 2.0
     ))
     capture_distance = max(float(np.linalg.norm(translation_limits)) + maximum_rotation_sweep, voxel_size * 3.0)
-    source_anchors, target_anchors, anchor_details = _manual_overlap_anchor_sets(
-        source_down_points, target_down_points, capture_distance
+    source_footprint_mask, target_footprint_mask, projected_details = _projected_xy_overlap_masks(
+        source_down_points, target_down_points, voxel_size
     )
-    baseline = _anchor_score(source_anchors, target_anchors, np.eye(4), final_tolerance)
-    minimum_anchor_overlap = 0.35
+    if projected_details["projected_overlap_used"]:
+        _emit(
+            progress_callback,
+            "Using shared X-Y footprint: "
+            f"{projected_details['projected_source_points']:,} source and "
+            f"{projected_details['projected_reference_points']:,} reference points before 3-D matching.",
+        )
+    source_anchors, target_anchors, anchor_details = _manual_overlap_anchor_sets(
+        source_down_points,
+        target_down_points,
+        capture_distance,
+        source_footprint_mask,
+        target_footprint_mask,
+    )
+    anchor_details.update(projected_details)
+    # Independently voxelised surveys do not generally have matching voxel
+    # centres.  This gate only validates the already frozen footprint; the
+    # final optimization stage remains stricter.  It must be wider than one
+    # voxel because points on a sloped surface can land in adjacent voxels in
+    # each scan even after a good manual placement.
+    score_tolerance = max(final_tolerance, voxel_size * 3.0)
+    baseline = _anchor_score(source_anchors, target_anchors, np.eye(4), score_tolerance)
+    minimum_anchor_overlap = 0.05
+    minimum_anchor_matches = max(50, min(500, min(len(source_anchors), len(target_anchors)) // 20))
     baseline_is_valid = (
         np.isfinite(baseline["rmse"])
         and min(baseline["source_overlap"], baseline["reference_overlap"]) >= minimum_anchor_overlap
-        and baseline["rmse"] <= final_tolerance * 0.75
+        and min(baseline["source_matches"], baseline["reference_matches"]) >= minimum_anchor_matches
     )
     _emit(progress_callback,
           f"Frozen manual overlap: {len(source_anchors):,} source and {len(target_anchors):,} reference anchor points.")
@@ -595,10 +735,11 @@ def automatic_registration(source_df: pd.DataFrame, target_df: pd.DataFrame,
         capture_distance,
         translation_limits,
         rotation_limits_degrees,
+        optimization_pivot,
         progress_callback,
         is_cancelled_callback,
     )
-    refined_score = _anchor_score(source_anchors, target_anchors, refined, final_tolerance)
+    refined_score = _anchor_score(source_anchors, target_anchors, refined, score_tolerance)
     correction_translation = optimizer_details["translation_correction"]
     correction_rotation = optimizer_details["rotation_correction_degrees"]
     correction_translation_vector = np.asarray(optimizer_details["translation_correction_vector"])
@@ -606,7 +747,7 @@ def automatic_registration(source_df: pd.DataFrame, target_df: pd.DataFrame,
     candidate_is_valid = (
         np.isfinite(refined_score["rmse"])
         and min(refined_score["source_overlap"], refined_score["reference_overlap"]) >= minimum_anchor_overlap
-        and refined_score["rmse"] <= final_tolerance * 0.75
+        and min(refined_score["source_matches"], refined_score["reference_matches"]) >= minimum_anchor_matches
         and np.all(np.abs(correction_translation_vector) <= translation_limits + 1e-9)
         and np.all(np.abs(correction_rotation_vector) <= rotation_limits_degrees + 1e-9)
     )
@@ -622,15 +763,13 @@ def automatic_registration(source_df: pd.DataFrame, target_df: pd.DataFrame,
     # directional coverage loses more than two percentage points.
     required_improvement = max(baseline["rmse"] * 0.02, voxel_size * 0.01) if baseline_is_valid else 0.0
     keeps_overlap = (
-        not baseline_is_valid
-        or (
-            refined_score["source_overlap"] >= baseline["source_overlap"] - 0.02
-            and refined_score["reference_overlap"] >= baseline["reference_overlap"] - 0.02
-        )
+        refined_score["source_overlap"] >= baseline["source_overlap"] - 0.02
+        and refined_score["reference_overlap"] >= baseline["reference_overlap"] - 0.02
     )
     improved = (
         candidate_is_valid
-        and (not baseline_is_valid or refined_score["rmse"] <= baseline["rmse"] - required_improvement)
+        and baseline_is_valid
+        and refined_score["rmse"] <= baseline["rmse"] - required_improvement
         and keeps_overlap
     )
 
@@ -675,11 +814,13 @@ def automatic_registration(source_df: pd.DataFrame, target_df: pd.DataFrame,
         "source_anchor_points": int(len(source_anchors)),
         "reference_anchor_points": int(len(target_anchors)),
         "anchor_details": anchor_details,
+        "projected_overlap": projected_details,
         "initialization": initialization,
         "candidate_count": 1,
         "search_radius": float(translation_search_extent),
         "translation_limits": [float(value) for value in translation_limits],
         "capture_distance": float(capture_distance),
+        "score_tolerance": float(score_tolerance),
         "rotation_limit_degrees": float(np.max(rotation_limits_degrees)),
         "rotation_limits_degrees": [float(value) for value in rotation_limits_degrees],
         "final_tolerance": float(final_tolerance),
@@ -803,7 +944,8 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
                           chunk_size: int = 100_000,
                           progress_callback: ProgressCallback = None,
                           is_cancelled_callback: CancelledCallback = None,
-                          include_pointwise: bool = False):
+                          include_pointwise: bool = False,
+                          distance_unit: str = "mm"):
     """Calculate unsigned source-to-reference surface deviations.
 
     Only source points within ``max_distance`` are included in the error
@@ -819,6 +961,7 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
     if max_distance <= 0:
         raise ValueError("The overlap/error cutoff must be greater than zero.")
 
+    distance_unit = str(distance_unit).strip() or "mm"
     source_total = len(source_points)
     max_analysis_points = int(max_analysis_points)
     sampled = False
@@ -828,35 +971,61 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
         source_points = source_points[indices]
         sampled = True
 
+    # A distance cutoff alone can accept an exposed scan edge when its nearest
+    # reference edge lies within that cutoff.  Restrict comparison to the
+    # common projected footprint first, so partial measurement extensions are
+    # never allowed to become the reported maximum error.  Use a fraction of
+    # the measured point spacing for a narrow boundary allowance rather than
+    # the (possibly much larger) user-selected error cutoff.
+    source_footprint, reference_footprint, footprint_details = _comparison_footprint_masks(
+        source_points, reference_points
+    )
+    comparison_reference_points = reference_points[reference_footprint]
+    if not len(comparison_reference_points):
+        comparison_reference_points = reference_points
+        source_footprint = np.zeros(len(source_points), dtype=bool)
+
     _check_cancelled(is_cancelled_callback)
-    _emit(progress_callback, f"Building nearest-neighbour index for {len(reference_points):,} reference points...")
-    reference_tree = cKDTree(reference_points)
+    _emit(
+        progress_callback,
+        "Using shared X-Y footprint: "
+        f"{int(np.count_nonzero(source_footprint)):,} source and "
+        f"{len(comparison_reference_points):,} reference points.",
+    )
+    _emit(progress_callback, f"Building nearest-neighbour index for {len(comparison_reference_points):,} reference points...")
+    reference_tree = cKDTree(comparison_reference_points)
     distances = np.empty(len(source_points), dtype=np.float64)
-    for start in range(0, len(source_points), max(1, int(chunk_size))):
+    distances.fill(np.inf)
+    footprint_indices = np.flatnonzero(source_footprint)
+    for start in range(0, len(footprint_indices), max(1, int(chunk_size))):
         _check_cancelled(is_cancelled_callback)
-        stop = min(start + max(1, int(chunk_size)), len(source_points))
-        distances[start:stop], _ = reference_tree.query(
-            source_points[start:stop], k=1, distance_upper_bound=max_distance, workers=-1
+        stop = min(start + max(1, int(chunk_size)), len(footprint_indices))
+        indices = footprint_indices[start:stop]
+        distances[indices], _ = reference_tree.query(
+            source_points[indices], k=1, distance_upper_bound=max_distance, workers=-1
         )
-        _emit(progress_callback, f"Comparing surface distances: {stop:,} / {len(source_points):,} points...")
+        _emit(progress_callback, f"Comparing surface distances: {stop:,} / {len(footprint_indices):,} footprint points...")
 
     in_overlap = np.isfinite(distances)
     overlap_distances = distances[in_overlap]
     overlap_count = int(len(overlap_distances))
     report = {
         "metric": "unsigned nearest-reference Euclidean distance",
-        "unit": "data coordinate units",
+        "unit": distance_unit,
         "source_points_total": int(source_total),
         "source_points_analysed": int(len(source_points)),
         "source_points_sampled": sampled,
-        "reference_points_indexed": int(len(reference_points)),
+        "reference_points_indexed": int(len(comparison_reference_points)),
         "overlap_cutoff": float(max_distance),
+        "projected_footprint_used": bool(footprint_details.get("projected_overlap_used", False)),
+        "projected_non_overlap_points": int(len(source_points) - np.count_nonzero(source_footprint)),
         "overlap_points": overlap_count,
         "non_overlap_points": int(len(source_points) - overlap_count),
         "overlap_fraction": float(overlap_count / len(source_points)),
     }
     if overlap_count:
         report.update({
+            "minimum": float(np.min(overlap_distances)),
             "mean": float(np.mean(overlap_distances)),
             "median": float(np.median(overlap_distances)),
             "rmse": float(np.sqrt(np.mean(np.square(overlap_distances)))),
@@ -864,7 +1033,7 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
             "maximum": float(np.max(overlap_distances)),
         })
     else:
-        report.update({"mean": None, "median": None, "rmse": None, "p95": None, "maximum": None})
+        report.update({"minimum": None, "mean": None, "median": None, "rmse": None, "p95": None, "maximum": None})
     _emit(progress_callback, f"Comparison complete: {report['overlap_fraction']:.1%} overlap.")
     if include_pointwise:
         # Keep the plotting data separate from the compact numeric report. The
