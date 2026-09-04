@@ -16,6 +16,7 @@ class ControlPanel(QWidget):
     settings_changed = pyqtSignal()
     export_requested = pyqtSignal(str)
     save_data_requested = pyqtSignal()
+    centre_data_requested = pyqtSignal()
     run_icp_requested = pyqtSignal(int, int, float, str) # source_idx, target_idx, max_dist, method
     run_legacy_global_alignment_requested = pyqtSignal(int, int, int) # source, reference, registration points
     run_auto_alignment_requested = pyqtSignal(int, int, int, float, float, float, float, float, float) # source, reference, points, +/- Tx/Ty/Tz, +/- Rx/Ry/Rz
@@ -248,6 +249,13 @@ class ControlPanel(QWidget):
         self.btn_save_data = QPushButton("Save Filtered Data")
         self.btn_save_data.clicked.connect(self.save_data_requested.emit)
         filter_layout.addWidget(self.btn_save_data)
+
+        self.btn_centre_data = QPushButton("Create Centred Copy")
+        self.btn_centre_data.setToolTip(
+            "Copy the selected original cloud and translate every XYZ point so its centroid is at (0, 0, 0)."
+        )
+        self.btn_centre_data.clicked.connect(self.centre_data_requested.emit)
+        filter_layout.addWidget(self.btn_centre_data)
         
         filter_layout.addStretch()
         tab_filter.setLayout(filter_layout)
@@ -532,7 +540,7 @@ class ControlPanel(QWidget):
         # Group parts that require selection
         self.requires_selection_widgets = [
             colors_group, analysis_display_group, camera_group, voxel_group, outlier_group,
-            self.btn_save_data, manual_group, icp_group, legacy_global_group, auto_group, comparison_group
+            self.btn_save_data, self.btn_centre_data, manual_group, icp_group, legacy_global_group, auto_group, comparison_group
         ]
         self._enable_selection_widgets(False)
         

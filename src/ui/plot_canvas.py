@@ -18,6 +18,8 @@ class PlotCanvas(FigureCanvas):
         self.setParent(parent)
         self.colorbars = []
         self._has_plotted_data = False
+        self._visible_dataset_ids = ()
+        self._fitted_limits = None
         
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.updateGeometry()
@@ -74,13 +76,33 @@ class PlotCanvas(FigureCanvas):
         self.axes.view_init(elev=self.axes.elev, azim=self.axes.azim + degrees)
         self.draw_idle()
 
+    def reset_view_to_data(self):
+        """Fit the current axes to the last plotted visible point-cloud extent."""
+        if self._fitted_limits is None:
+            return
+
+        xlim, ylim, zlim = self._fitted_limits
+        self.axes.set_xlim3d(xlim)
+        self.axes.set_ylim3d(ylim)
+        self.axes.set_zlim3d(zlim)
+        self.draw_idle()
+
         
     def plot_datasets(self, datasets: list):
         # ``cla`` resets the 3-D camera. Preserve it after the first plot so a
         # manual transform updates the geometry without losing the user's
         # zoomed/panned inspection view.
+        visible_dataset_ids = tuple(
+            id(d) for d in datasets
+            if d.get("visible", False) and "df_filtered" in d and not d["df_filtered"].empty
+        )
+        # Keep a user's inspection view while refreshing the same clouds (for
+        # example after a small transform).  A different visible cloud needs a
+        # fresh fitted extent; otherwise it may be completely outside the old
+        # zoom window after being loaded.
+        preserve_limits = self._has_plotted_data and visible_dataset_ids == self._visible_dataset_ids
         view_state = None
-        if self._has_plotted_data:
+        if preserve_limits:
             view_state = {
                 "elev": self.axes.elev,
                 "azim": self.axes.azim,
@@ -118,6 +140,8 @@ class PlotCanvas(FigureCanvas):
         visible_datasets = [d for d in datasets if d.get("visible", False) and "df_filtered" in d and not d["df_filtered"].empty]
         
         if not visible_datasets:
+            self._visible_dataset_ids = ()
+            self._fitted_limits = None
             self.draw()
             return
             
@@ -240,6 +264,14 @@ class PlotCanvas(FigureCanvas):
             except AttributeError:
                 pass
 
+            # Matplotlib has just auto-scaled the scatter collections.  Keep
+            # that complete-data extent for the toolbar's Home action.
+            self._fitted_limits = (
+                self.axes.get_xlim3d(),
+                self.axes.get_ylim3d(),
+                self.axes.get_zlim3d(),
+            )
+
         if view_state is not None:
             try:
                 if view_state["roll"] is None:
@@ -256,6 +288,7 @@ class PlotCanvas(FigureCanvas):
             self.axes.set_zlim3d(view_state["zlim"])
 
         self._has_plotted_data = True
+        self._visible_dataset_ids = visible_dataset_ids
             
         self.draw_idle()
 

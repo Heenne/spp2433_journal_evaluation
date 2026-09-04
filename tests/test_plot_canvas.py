@@ -101,6 +101,31 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
         self.assertAlmostEqual(canvas.axes.azim, 90.0)
         canvas.deleteLater()
 
+    def test_new_visible_cloud_refits_limits_but_refreshing_the_same_one_preserves_them(self):
+        first = {
+            "name": "first",
+            "visible": True,
+            "df_filtered": pd.DataFrame([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], columns=["X", "Y", "Z"]),
+            "settings": {"base_color": "C0"},
+        }
+        second = {
+            "name": "second",
+            "visible": True,
+            "df_filtered": pd.DataFrame([[100.0, 100.0, 100.0], [101.0, 101.0, 101.0]], columns=["X", "Y", "Z"]),
+            "settings": {"base_color": "C1"},
+        }
+        canvas = PlotCanvas()
+        canvas.plot_datasets([first])
+        canvas.axes.set_xlim3d((-5.0, 5.0))
+        canvas.plot_datasets([first])
+        self.assertEqual(canvas.axes.get_xlim3d(), (-5.0, 5.0))
+
+        canvas.plot_datasets([second])
+        self.assertGreater(canvas.axes.get_xlim3d()[0], 90.0)
+        canvas.reset_view_to_data()
+        self.assertGreater(canvas.axes.get_xlim3d()[0], 90.0)
+        canvas.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

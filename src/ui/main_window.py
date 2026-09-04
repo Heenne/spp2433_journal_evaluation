@@ -16,12 +16,21 @@ from src.data.filter import (
     save_filtered_data, load_filter_config, save_filter_config,
     filter_by_zscore, filter_by_bounding_box, filter_by_sor, filter_by_voxel_grid
 )
+from src.data.centering import centre_point_cloud, save_centred_point_cloud
 from src.utils.registration import (
     run_icp, automatic_registration, global_automatic_registration, calculate_cloud_error,
     euler_translation_to_matrix, matrix_to_euler_translation,
 )
 from src.utils.worker import WorkerThread
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+
+
+class PointCloudNavigationToolbar(NavigationToolbar):
+    """Make the standard Home button fit all plotted point-cloud data."""
+
+    def home(self, *args):
+        self.canvas.reset_view_to_data()
+        self.push_current()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -121,6 +130,7 @@ class MainWindow(QMainWindow):
         self.control_panel.settings_changed.connect(self.on_settings_changed)
         self.control_panel.export_requested.connect(self.export_plot)
         self.control_panel.save_data_requested.connect(self.save_filtered_dataset)
+        self.control_panel.centre_data_requested.connect(self.create_centred_copy)
         self.control_panel.run_icp_requested.connect(self.on_run_icp)
         self.control_panel.run_legacy_global_alignment_requested.connect(self.on_run_legacy_global_alignment)
         self.control_panel.run_auto_alignment_requested.connect(self.on_run_auto_alignment)
@@ -133,7 +143,7 @@ class MainWindow(QMainWindow):
         # Plot Canvas
         plot_layout = QVBoxLayout()
         self.plot_canvas = PlotCanvas(self)
-        self.toolbar = NavigationToolbar(self.plot_canvas, self)
+        self.toolbar = PointCloudNavigationToolbar(self.plot_canvas, self)
         
         plot_layout.addWidget(self.toolbar)
         plot_layout.addWidget(self.plot_canvas)
@@ -189,6 +199,8 @@ class MainWindow(QMainWindow):
             self.comparison_worker.cancel()
         if hasattr(self, 'save_worker') and self.save_worker.isRunning():
             self.save_worker.cancel()
+        if hasattr(self, 'centre_worker') and self.centre_worker.isRunning():
+            self.centre_worker.cancel()
         self.statusBar().showMessage("Cancelling... (Waiting for worker to abort)")
         
     def open_convert_dialog(self):
@@ -1192,6 +1204,44 @@ class MainWindow(QMainWindow):
         self.save_worker.finished.connect(on_finished)
         self.save_worker.error.connect(on_error)
         self.save_worker.start()
+
+    def create_centred_copy(self):
+        """Save a translated copy of the selected source cloud without altering it."""
+        idx = self.control_panel.dataset_list.currentRow()
+        if idx < 0 or idx >= len(self.datasets):
+            return
+        if hasattr(self, "centre_worker") and self.centre_worker.isRunning():
+            return
+
+        dataset = self.datasets[idx]
+        self.set_loading_state(True, "Creating centred point-cloud copy...")
+
+        def centre_and_save():
+            centred, centroid = centre_point_cloud(dataset["df"])
+            filepath = save_centred_point_cloud(centred, dataset["filepath"], centroid)
+            return filepath, centroid
+
+        self.centre_worker = WorkerThread(centre_and_save)
+
+        def on_finished(result):
+            filepath, centroid = result
+            self.set_loading_state(False, "Ready.")
+            QMessageBox.information(
+                self,
+                "Centred Copy Created",
+                "The original file was not changed.\n\n"
+                f"Saved copy:\n{filepath}\n\n"
+                "Original centroid subtracted (data units):\n"
+                f"X={centroid[0]:.3f}, Y={centroid[1]:.3f}, Z={centroid[2]:.3f}",
+            )
+
+        def on_error(error):
+            self.set_loading_state(False, "Could not create centred copy.")
+            QMessageBox.critical(self, "Centred Copy Error", str(error))
+
+        self.centre_worker.finished.connect(on_finished)
+        self.centre_worker.error.connect(on_error)
+        self.centre_worker.start()
 
     def closeEvent(self, event):
         """Offer Save / Discard / Cancel when project-owned state changed."""
