@@ -24,7 +24,7 @@ class ControlPanel(QWidget):
     run_icp_requested = pyqtSignal(int, int, float, str) # source_idx, target_idx, max_dist, method
     run_legacy_global_alignment_requested = pyqtSignal(int, int, int) # source, reference, registration points
     run_auto_alignment_requested = pyqtSignal(int, int, int, float, float, float, float, float, float) # source, reference, points, +/- Tx/Ty/Tz, +/- Rx/Ry/Rz
-    calculate_error_requested = pyqtSignal(int, int, float, int, bool, bool) # source_idx, reference_idx, cutoff, max_analysis_points, show_map, highlight_above_mean
+    calculate_error_requested = pyqtSignal(int, int, float, int, bool, bool, str) # source_idx, reference_idx, cutoff, max_analysis_points, show_map, highlight_above_mean, colour_mode
     error_map_display_changed = pyqtSignal(bool)
     error_map_colour_mode_changed = pyqtSignal(str)
     camera_view_requested = pyqtSignal(str)
@@ -526,6 +526,8 @@ class ControlPanel(QWidget):
         comparison_layout = QFormLayout()
         self.comparison_source_combo = QComboBox()
         self.comparison_target_combo = QComboBox()
+        self._previous_comparison_source_idx = -1
+        self._previous_comparison_target_idx = -1
         self.comparison_source_combo.currentIndexChanged.connect(
             lambda _: self._sync_comparison_selectors(source_changed=True)
         )
@@ -537,8 +539,8 @@ class ControlPanel(QWidget):
         self.comparison_cutoff_spin.setValue(1.0)
         self.comparison_cutoff_spin.setDecimals(6)
         self.comparison_cutoff_spin.setToolTip(
-            "Only points within this distance of the reference are treated as overlap. "
-            "Points outside the common scan area are reported separately, not included in error statistics."
+            "Only points supported by the reference footprint and within this distance of the reference "
+            "are treated as overlap. Other points are reported separately."
         )
         self.comparison_points_spin = QSpinBox()
         self.comparison_points_spin.setRange(0, 5_000_000)
@@ -548,13 +550,20 @@ class ControlPanel(QWidget):
         self.comparison_points_spin.setToolTip(
             "Maximum source points used for the report. A reproducible random sample is used above the limit; set to 0 for all points."
         )
+        self.comparison_colour_mode_combo = QComboBox()
+        self.comparison_colour_mode_combo.addItem("Closest-reference distance", "closest_distance")
+        self.comparison_colour_mode_combo.addItem("Difference from mean distance", "difference_from_mean")
+        self.comparison_colour_mode_combo.setToolTip(
+            "Choose how the calculated nearest-reference distances are coloured. "
+            "The statistics always use the actual nearest-reference distances."
+        )
         self.btn_calculate_error = QPushButton("Calculate Surface Error")
         self.btn_calculate_error.clicked.connect(self._on_calculate_error_clicked)
         self.comparison_show_map_check = QCheckBox("Show pointwise error colour map after calculation")
         self.comparison_show_map_check.setChecked(True)
         self.comparison_show_map_check.setToolTip(
-            "Colours every analysed source-cloud point by its distance to the reference. "
-            "Points outside the overlap cutoff are shown in grey."
+            "Colours every analysed source-cloud point using the selected error-map colouring. "
+            "Points outside the reference footprint or overlap cutoff are shown in grey."
         )
         self.comparison_highlight_mean_check = QCheckBox("Highlight errors above the mean in red")
         self.comparison_highlight_mean_check.setToolTip(
@@ -568,6 +577,7 @@ class ControlPanel(QWidget):
         comparison_layout.addRow("Reference:", self.comparison_target_combo)
         comparison_layout.addRow("Overlap / error cutoff:", self.comparison_cutoff_spin)
         comparison_layout.addRow("Maximum source points:", self.comparison_points_spin)
+        comparison_layout.addRow("Error-map colouring:", self.comparison_colour_mode_combo)
         comparison_layout.addRow("", self.btn_calculate_error)
         comparison_layout.addRow("", self.comparison_show_map_check)
         comparison_layout.addRow("", self.comparison_highlight_mean_check)
@@ -604,6 +614,12 @@ class ControlPanel(QWidget):
         self.export_colourbar_height_spin.setSingleStep(0.05)
         self.export_colourbar_height_spin.setDecimals(2)
         self.export_colourbar_height_spin.setToolTip("Colour-bar height as a fraction of the plot height.")
+        self.export_colourbar_decimals_spin = QSpinBox()
+        self.export_colourbar_decimals_spin.setRange(0, 10)
+        self.export_colourbar_decimals_spin.setValue(2)
+        self.export_colourbar_decimals_spin.setToolTip(
+            "Number of decimal places shown on the colour-bar scale in exported images."
+        )
         self.export_point_size_spin = QDoubleSpinBox()
         self.export_point_size_spin.setRange(0.1, 20.0)
         self.export_point_size_spin.setValue(2.0)
@@ -647,6 +663,7 @@ class ControlPanel(QWidget):
         export_options_layout.addRow("Heatmap colours:", self.export_heatmap_colormap_combo)
         export_options_layout.addRow("Height-map colours:", self.export_heightmap_colormap_combo)
         export_options_layout.addRow("Colour-bar height:", self.export_colourbar_height_spin)
+        export_options_layout.addRow("Colour-bar decimal places:", self.export_colourbar_decimals_spin)
         export_options_layout.addRow("Point size:", self.export_point_size_spin)
         export_options_layout.addRow("X-axis label:", self.export_x_axis_name)
         export_options_layout.addRow("Y-axis label:", self.export_y_axis_name)
@@ -774,17 +791,19 @@ class ControlPanel(QWidget):
         self._sync_comparison_selectors(source_changed=True)
 
     def _sync_comparison_selectors(self, source_changed: bool):
-        """Keep surface-error source/reference selections distinct.
-
-        The currently selected source is disabled in the reference menu and
-        vice versa.  The collision fallback also protects programmatic changes
-        and keeps the Calculate button meaningful with fewer than two clouds.
-        """
+        """Keep both clouds selectable and swap roles when selections collide."""
         source_idx = self.comparison_source_combo.currentIndex()
         target_idx = self.comparison_target_combo.currentIndex()
         count = self.comparison_source_combo.count()
         if count >= 2 and source_idx == target_idx:
-            alternative = next(index for index in range(count) if index != source_idx)
+            previous_idx = (
+                self._previous_comparison_source_idx
+                if source_changed else self._previous_comparison_target_idx
+            )
+            alternative = (
+                previous_idx if 0 <= previous_idx < count and previous_idx != source_idx
+                else next(index for index in range(count) if index != source_idx)
+            )
             if source_changed:
                 self.comparison_target_combo.blockSignals(True)
                 self.comparison_target_combo.setCurrentIndex(alternative)
@@ -796,15 +815,14 @@ class ControlPanel(QWidget):
             source_idx = self.comparison_source_combo.currentIndex()
             target_idx = self.comparison_target_combo.currentIndex()
 
-        for combo, unavailable_idx in (
-            (self.comparison_source_combo, target_idx),
-            (self.comparison_target_combo, source_idx),
-        ):
+        self._previous_comparison_source_idx = source_idx
+        self._previous_comparison_target_idx = target_idx
+        for combo in (self.comparison_source_combo, self.comparison_target_combo):
             model = combo.model()
             for index in range(count):
                 item = model.item(index) if hasattr(model, "item") else None
                 if item is not None:
-                    item.setEnabled(count >= 2 and index != unavailable_idx)
+                    item.setEnabled(count >= 2)
         self.btn_calculate_error.setEnabled(count >= 2)
         
     def _on_selection_changed(self):
@@ -925,6 +943,7 @@ class ControlPanel(QWidget):
             "heatmap_colormap": self.export_heatmap_colormap_combo.currentText(),
             "heightmap_colormap": self.export_heightmap_colormap_combo.currentText(),
             "colourbar_height": self.export_colourbar_height_spin.value(),
+            "colourbar_decimals": self.export_colourbar_decimals_spin.value(),
             "point_size": self.export_point_size_spin.value(),
             "x_label": self.export_x_axis_name.text() or "X",
             "y_label": self.export_y_axis_name.text() or "Y",
@@ -949,6 +968,7 @@ class ControlPanel(QWidget):
         self.export_heatmap_colormap_combo.setCurrentText(options.get("heatmap_colormap", "turbo"))
         self.export_heightmap_colormap_combo.setCurrentText(options.get("heightmap_colormap", "viridis"))
         self.export_colourbar_height_spin.setValue(float(options.get("colourbar_height", 1.0)))
+        self.export_colourbar_decimals_spin.setValue(int(options.get("colourbar_decimals", 2)))
         self.export_point_size_spin.setValue(float(options.get("point_size", 2.0)))
         self.export_x_axis_name.setText(options.get("x_label", "X"))
         self.export_y_axis_name.setText(options.get("y_label", "Y"))
@@ -1044,6 +1064,7 @@ class ControlPanel(QWidget):
                 self.comparison_points_spin.value(),
                 self.comparison_show_map_check.isChecked(),
                 self.comparison_highlight_mean_check.isChecked(),
+                self.comparison_colour_mode_combo.currentData(),
             )
 
     def set_comparison_summary(self, summary: str):

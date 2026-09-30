@@ -1,9 +1,11 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+from matplotlib.figure import Figure
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -179,8 +181,20 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
         window = MainWindow.__new__(MainWindow)
         with tempfile.TemporaryDirectory() as directory:
             output = os.path.join(directory, "error_map.png")
-            result = window.export_full_resolution_background([source, reference], output, window._export_view_state(canvas))
+            colourbar_formats = []
+            original_colorbar = Figure.colorbar
+
+            def record_colorbar(figure, *args, **kwargs):
+                colourbar_formats.append(kwargs.get("format"))
+                return original_colorbar(figure, *args, **kwargs)
+
+            with patch.object(Figure, "colorbar", record_colorbar):
+                result = window.export_full_resolution_background(
+                    [source, reference], output, window._export_view_state(canvas),
+                    export_options={"colourbar_decimals": 4},
+                )
             self.assertEqual(result["error_maps_rendered"], 1)
+            self.assertEqual(colourbar_formats, ["%.4f"])
             self.assertTrue(os.path.exists(output))
         canvas.deleteLater()
 

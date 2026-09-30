@@ -1090,7 +1090,8 @@ class MainWindow(QMainWindow):
         return report, pointwise, source_dataset, target_dataset
 
     def on_calculate_error(self, source_idx: int, target_idx: int, cutoff: float, max_analysis_points: int,
-                           show_error_map: bool = True, highlight_above_mean: bool = False):
+                           show_error_map: bool = True, highlight_above_mean: bool = False,
+                           colour_mode: str = "closest_distance"):
         if hasattr(self, 'comparison_worker') and self.comparison_worker.isRunning():
             return
         source_dataset = self.datasets[source_idx]
@@ -1123,7 +1124,7 @@ class MainWindow(QMainWindow):
                 "unit": report["unit"],
                 "mean": report["mean"],
                 "highlight_above_mean": highlight_above_mean,
-                "colour_mode": "closest_distance",
+                "colour_mode": colour_mode,
             }
             source["show_error_visualization"] = show_error_map
             summary = self._format_error_report(report)
@@ -1131,14 +1132,14 @@ class MainWindow(QMainWindow):
             self.set_loading_state(False, "Surface-error comparison complete.")
             self.plot_canvas.plot_datasets(self.datasets)
             if self.control_panel.dataset_list.currentRow() == source_idx:
-                self.control_panel.set_error_map_display_state(True, show_error_map, "closest_distance")
+                self.control_panel.set_error_map_display_state(True, show_error_map, colour_mode)
             QMessageBox.information(
                 self,
                 "Surface Error Report",
                 f"{source['name']} -> {target['name']}\n\n{summary}\n\n"
                 f"Errors are unsigned nearest-reference distances in {report['unit']}. "
-                "Points beyond the cutoff are treated as non-overlap and are excluded from the statistics."
-                + (" The plot now shows the analysed source points coloured by this distance; grey means outside the cutoff."
+                "Points outside the reference footprint or beyond the cutoff are excluded from the statistics."
+                + (" The plot now shows the analysed source points coloured by this distance; grey means outside the overlap."
                    if show_error_map else ""),
             )
 
@@ -1306,6 +1307,7 @@ class MainWindow(QMainWindow):
         figure = Figure(figsize=(10, 6.5), dpi=150, constrained_layout=True)
         axes = figure.add_subplot(111, projection="3d")
         export_options = export_options or {}
+        colourbar_format = f"%.{int(export_options.get('colourbar_decimals', 2))}f"
         extension = os.path.splitext(filepath)[1].lower()
         rasterize_points = extension == ".svg"
         point_size = float(export_options.get("point_size", 2.0))
@@ -1439,11 +1441,12 @@ class MainWindow(QMainWindow):
                     figure.colorbar(
                         scatter, ax=axes, label=colourbar_label, pad=0.1,
                         shrink=float(export_options.get("colourbar_height", 1.0)),
+                        format=colourbar_format,
                     )
                 if np.any(~in_overlap):
                     axes.scatter(
                         points[~in_overlap, 0], points[~in_overlap, 1], points[~in_overlap, 2], c="0.55",
-                        marker=".", s=point_size, label=f"{display_label} outside cutoff", zorder=zorder,
+                        marker=".", s=point_size, label=f"{display_label} outside overlap", zorder=zorder,
                         rasterized=rasterize_points, axlim_clip=True,
                     )
                 error_maps_rendered += 1
@@ -1466,6 +1469,7 @@ class MainWindow(QMainWindow):
             figure.colorbar(
                 height_mappable, ax=axes, label=f"Height / Z coordinate ({unit})", pad=0.1,
                 shrink=float(export_options.get("colourbar_height", 1.0)),
+                format=colourbar_format,
             )
 
         axes.set_xlabel(export_options.get("x_label", "X"))

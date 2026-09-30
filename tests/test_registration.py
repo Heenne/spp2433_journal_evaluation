@@ -128,6 +128,39 @@ class LocalFineAlignmentTests(unittest.TestCase):
         report_metres = calculate_cloud_error(source, reference, max_distance=0.5, max_analysis_points=0, distance_unit="m")
         self.assertEqual(report_metres["unit"], "m")
 
+    def test_surface_error_keeps_reference_covered_corners(self):
+        grid = np.array([(x, y, 0.0) for x in range(21) for y in range(21)], dtype=float)
+        extension = np.array([(x, y, 0.0) for x in range(21) for y in range(25, 31)], dtype=float)
+        source = self._frame(np.vstack((grid, extension)))
+        reference = self._frame(grid)
+
+        report, pointwise = calculate_cloud_error(
+            source, reference, max_distance=30.0, max_analysis_points=0, include_pointwise=True
+        )
+
+        self.assertTrue(np.all(np.isfinite(pointwise["distances"][:len(grid)])))
+        self.assertTrue(np.all(np.isinf(pointwise["distances"][len(grid):])))
+        self.assertEqual(report["overlap_points"], len(grid))
+
+    def test_surface_error_keeps_a_hole_within_the_distance_cutoff(self):
+        reference_points = np.array(
+            [(x, y, 0.0) for x in range(21) for y in range(21)
+             if not (8 <= x <= 12 and 8 <= y <= 12)], dtype=float
+        )
+        source_points = np.vstack((
+            [[10.0, 10.0, 0.0], [10.0, 25.0, 0.0]],
+            [[x, 0.0, 0.0] for x in range(21)],
+        ))
+
+        report, pointwise = calculate_cloud_error(
+            self._frame(source_points), self._frame(reference_points),
+            max_distance=4.0, max_analysis_points=0, include_pointwise=True,
+        )
+
+        self.assertAlmostEqual(pointwise["distances"][0], 3.0)
+        self.assertTrue(np.isinf(pointwise["distances"][1]))
+        self.assertEqual(report["overlap_points"], len(source_points) - 1)
+
     def test_surface_error_can_return_pointwise_colours_for_the_analysed_points(self):
         source = self._frame(np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]]))
         reference = self._frame(np.array([[0.2, 0.0, 0.0]]))

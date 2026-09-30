@@ -52,7 +52,10 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
 
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0][:4], (0, 1, 1.0, 250_000))
-        self.assertEqual(received[0][4:], (True, False))
+        self.assertEqual(received[0][4:], (True, False, "closest_distance"))
+        panel.comparison_colour_mode_combo.setCurrentIndex(1)
+        panel._on_calculate_error_clicked()
+        self.assertEqual(received[1][-1], "difference_from_mean")
         panel.deleteLater()
 
     def test_surface_error_has_separate_source_and_reference_selectors(self):
@@ -62,15 +65,15 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
 
         self.assertEqual(panel.comparison_source_combo.currentIndex(), 0)
         self.assertEqual(panel.comparison_target_combo.currentIndex(), 1)
-        self.assertFalse(panel.comparison_target_combo.model().item(0).isEnabled())
-        self.assertFalse(panel.comparison_source_combo.model().item(1).isEnabled())
+        self.assertTrue(panel.comparison_target_combo.model().item(0).isEnabled())
+        self.assertTrue(panel.comparison_source_combo.model().item(1).isEnabled())
 
-        # Even a programmatic collision is resolved to two different clouds.
         panel.comparison_source_combo.setCurrentIndex(1)
-        self.assertNotEqual(
-            panel.comparison_source_combo.currentIndex(),
-            panel.comparison_target_combo.currentIndex(),
-        )
+        self.assertEqual(panel.comparison_source_combo.currentIndex(), 1)
+        self.assertEqual(panel.comparison_target_combo.currentIndex(), 0)
+        panel.comparison_target_combo.setCurrentIndex(1)
+        self.assertEqual(panel.comparison_source_combo.currentIndex(), 0)
+        self.assertEqual(panel.comparison_target_combo.currentIndex(), 1)
         panel.deleteLater()
 
     def test_distance_unit_defaults_to_mm_and_is_saved_with_dataset_settings(self):
@@ -130,6 +133,7 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         panel.export_heatmap_colormap_combo.setCurrentText("magma")
         panel.export_heightmap_colormap_combo.setCurrentText("cividis")
         panel.export_colourbar_height_spin.setValue(0.65)
+        panel.export_colourbar_decimals_spin.setValue(4)
         panel.export_point_size_spin.setValue(0.4)
         panel.export_x_axis_name.setText("Chord (mm)")
         panel.export_legend_point_size_spin.setValue(25.0)
@@ -148,6 +152,7 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         self.assertTrue(options["use_heightmap"])
         self.assertEqual(options["heatmap_colormap"], "magma")
         self.assertEqual(options["heightmap_colormap"], "cividis")
+        self.assertEqual(options["colourbar_decimals"], 4)
         self.assertEqual(options["point_size"], 0.4)
         self.assertEqual(options["x_label"], "Chord (mm)")
         self.assertEqual(options["legend_title"], "Measurements")
@@ -155,6 +160,10 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         self.assertEqual(options["legend_position"], "lower left")
         self.assertEqual(options["legend_placement"], "outside")
         self.assertEqual(options["legend_labels"], {"raw": "Reference", "scan": "Project scan"})
+        restored = ControlPanel()
+        restored.apply_export_options(options)
+        self.assertEqual(restored.export_colourbar_decimals_spin.value(), 4)
+        restored.deleteLater()
         panel.deleteLater()
 
     def test_error_and_height_export_maps_are_mutually_exclusive(self):

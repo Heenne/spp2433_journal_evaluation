@@ -224,7 +224,7 @@ class PlotCanvas(FigureCanvas):
                 if np.any(~in_overlap):
                     self.axes.scatter(
                         x[~in_overlap], y[~in_overlap], z[~in_overlap], c="0.55", marker='.', s=point_size,
-                        label=f"{name} outside cutoff", zorder=zorder, axlim_clip=True,
+                        label=f"{name} outside overlap", zorder=zorder, axlim_clip=True,
                     )
                 if error_map.get("highlight_above_mean") and error_map.get("mean") is not None:
                     above_mean = in_overlap & (distances > float(error_map["mean"]))

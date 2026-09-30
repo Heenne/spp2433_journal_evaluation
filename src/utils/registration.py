@@ -398,27 +398,50 @@ def _projected_xy_overlap_masks(source_points: np.ndarray, target_points: np.nda
 
 
 def _comparison_footprint_masks(source_points: np.ndarray, reference_points: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Return the strict shared footprint used by surface-error statistics."""
+    """Keep points inside the reference outline, including measured surface holes."""
     if min(len(source_points), len(reference_points)) < 20:
-        # An envelope made from only a few isolated samples is not a surface
-        # footprint.  Preserve the conventional cutoff-only result for these
-        # small diagnostic point sets.
+        # A few isolated samples cannot define a reliable surface footprint.
         return (
             np.ones(len(source_points), dtype=bool),
             np.ones(len(reference_points), dtype=bool),
             {"projected_overlap_used": False},
         )
-    spacings = [
-        value for value in (_estimate_point_spacing(source_points), _estimate_point_spacing(reference_points))
-        if value > 0
-    ]
-    footprint_voxel = max((min(spacings) * 0.25) if spacings else 1e-6, 1e-6)
-    return _projected_xy_overlap_masks(
-        source_points,
-        reference_points,
-        footprint_voxel,
-        exclude_partial_extensions=True,
-    )
+    from scipy.spatial import ConvexHull, QhullError, cKDTree
+
+    reference_xy = np.asarray(reference_points, dtype=np.float64)[:, :2]
+    source_xy = np.asarray(source_points, dtype=np.float64)[:, :2]
+    try:
+        outline_equations = ConvexHull(reference_xy).equations
+    except QhullError:
+        # A line-like diagnostic scan has no 2-D outline. For this case only,
+        # use local reference support to reject source extensions.
+        outline_equations = None
+        reference_tree = cKDTree(reference_xy)
+        sample = reference_xy[np.linspace(0, len(reference_xy) - 1, min(len(reference_xy), 20_000), dtype=np.int64)]
+        neighbour_distances, _ = reference_tree.query(sample, k=2, workers=-1)
+        positive_spacings = neighbour_distances[:, 1]
+        positive_spacings = positive_spacings[np.isfinite(positive_spacings) & (positive_spacings > 0)]
+        spacing = float(np.percentile(positive_spacings, 95)) if len(positive_spacings) else 0.0
+        support_radius = max(0.95 * spacing, 1e-6)
+    source_mask = np.zeros(len(source_xy), dtype=bool)
+    for start in range(0, len(source_xy), 100_000):
+        stop = min(start + 100_000, len(source_xy))
+        if outline_equations is not None:
+            chunk = source_xy[start:stop]
+            inside = np.ones(len(chunk), dtype=bool)
+            for a, b, c in outline_equations:
+                inside &= a * chunk[:, 0] + b * chunk[:, 1] + c <= 1e-9
+            source_mask[start:stop] = inside
+        else:
+            distances, _ = reference_tree.query(
+                source_xy[start:stop], k=1, distance_upper_bound=support_radius, workers=-1
+            )
+            source_mask[start:stop] = np.isfinite(distances)
+    return source_mask, np.ones(len(reference_xy), dtype=bool), {
+        "projected_overlap_used": True,
+        "projected_source_points": int(np.count_nonzero(source_mask)),
+        "projected_reference_points": int(len(reference_xy)),
+    }
 
 
 def _manual_overlap_anchor_sets(source_points: np.ndarray, target_points: np.ndarray,
@@ -971,12 +994,9 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
         source_points = source_points[indices]
         sampled = True
 
-    # A distance cutoff alone can accept an exposed scan edge when its nearest
-    # reference edge lies within that cutoff.  Restrict comparison to the
-    # common projected footprint first, so partial measurement extensions are
-    # never allowed to become the reported maximum error.  Use a fraction of
-    # the measured point spacing for a narrow boundary allowance rather than
-    # the (possibly much larger) user-selected error cutoff.
+    # A 3-D distance cutoff alone can accept a narrow unsupported scan edge.
+    # Check the reference's projected outline first, without cropping valid
+    # corners or treating small gaps in the measurement as outside coverage.
     source_footprint, reference_footprint, footprint_details = _comparison_footprint_masks(
         source_points, reference_points
     )
