@@ -27,6 +27,7 @@ class ControlPanel(QWidget):
     calculate_error_requested = pyqtSignal(int, int, float, int, bool, bool, str) # source_idx, reference_idx, cutoff, max_analysis_points, show_map, highlight_above_mean, colour_mode
     error_map_display_changed = pyqtSignal(bool)
     error_map_colour_mode_changed = pyqtSignal(str)
+    error_map_max_changed = pyqtSignal(float)
     camera_view_requested = pyqtSignal(str)
     camera_rotate_requested = pyqtSignal(float)
     camera_angles_requested = pyqtSignal(float, float, float)
@@ -539,12 +540,13 @@ class ControlPanel(QWidget):
         self.comparison_cutoff_spin.setValue(1.0)
         self.comparison_cutoff_spin.setDecimals(6)
         self.comparison_cutoff_spin.setToolTip(
-            "Only points supported by the reference footprint and within this distance of the reference "
-            "are treated as overlap. Other points are reported separately."
+            "Exclude an outer reference-edge band up to this width to avoid boundary artifacts. "
+            "All remaining points inside the reference X/Y area contribute to the error statistics, "
+            "including errors larger than this value."
         )
         self.comparison_points_spin = QSpinBox()
         self.comparison_points_spin.setRange(0, 5_000_000)
-        self.comparison_points_spin.setValue(250_000)
+        self.comparison_points_spin.setValue(0)
         self.comparison_points_spin.setSingleStep(50_000)
         self.comparison_points_spin.setSpecialValueText("All source points")
         self.comparison_points_spin.setToolTip(
@@ -557,13 +559,22 @@ class ControlPanel(QWidget):
             "Choose how the calculated nearest-reference distances are coloured. "
             "The statistics always use the actual nearest-reference distances."
         )
+        self.error_map_max_spin = QDoubleSpinBox()
+        self.error_map_max_spin.setRange(0.0, 1_000_000.0)
+        self.error_map_max_spin.setDecimals(6)
+        self.error_map_max_spin.setSpecialValueText("Auto (P95)")
+        self.error_map_max_spin.setToolTip(
+            "Upper colour-scale limit for closest-reference distance. Values above it remain in the "
+            "statistics and use the highest colour. Zero uses P95 automatically."
+        )
+        self.error_map_max_spin.valueChanged.connect(self.error_map_max_changed.emit)
         self.btn_calculate_error = QPushButton("Calculate Surface Error")
         self.btn_calculate_error.clicked.connect(self._on_calculate_error_clicked)
         self.comparison_show_map_check = QCheckBox("Show pointwise error colour map after calculation")
         self.comparison_show_map_check.setChecked(True)
         self.comparison_show_map_check.setToolTip(
             "Colours every analysed source-cloud point using the selected error-map colouring. "
-            "Points outside the reference footprint or overlap cutoff are shown in grey."
+            "Points excluded from error statistics are shown in grey."
         )
         self.comparison_highlight_mean_check = QCheckBox("Highlight errors above the mean in red")
         self.comparison_highlight_mean_check.setToolTip(
@@ -575,9 +586,10 @@ class ControlPanel(QWidget):
         self.comparison_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         comparison_layout.addRow("Source:", self.comparison_source_combo)
         comparison_layout.addRow("Reference:", self.comparison_target_combo)
-        comparison_layout.addRow("Overlap / error cutoff:", self.comparison_cutoff_spin)
+        comparison_layout.addRow("Reference edge margin:", self.comparison_cutoff_spin)
         comparison_layout.addRow("Maximum source points:", self.comparison_points_spin)
         comparison_layout.addRow("Error-map colouring:", self.comparison_colour_mode_combo)
+        comparison_layout.addRow("Heatmap maximum:", self.error_map_max_spin)
         comparison_layout.addRow("", self.btn_calculate_error)
         comparison_layout.addRow("", self.comparison_show_map_check)
         comparison_layout.addRow("", self.comparison_highlight_mean_check)
@@ -619,6 +631,15 @@ class ControlPanel(QWidget):
         self.export_colourbar_decimals_spin.setValue(2)
         self.export_colourbar_decimals_spin.setToolTip(
             "Number of decimal places shown on the colour-bar scale in exported images."
+        )
+        self.export_colourbar_label = QTextEdit()
+        self.export_colourbar_label.setPlaceholderText(
+            "Unsigned distance to reference\n(mm; colours capped at manual max)"
+        )
+        self.export_colourbar_label.setFixedHeight(72)
+        self.export_colourbar_label.setToolTip(
+            "Custom colour-bar label; press Enter to add a line break. "
+            "Leave empty to use the automatic label with the current unit and colour limit."
         )
         self.export_point_size_spin = QDoubleSpinBox()
         self.export_point_size_spin.setRange(0.1, 20.0)
@@ -664,6 +685,7 @@ class ControlPanel(QWidget):
         export_options_layout.addRow("Height-map colours:", self.export_heightmap_colormap_combo)
         export_options_layout.addRow("Colour-bar height:", self.export_colourbar_height_spin)
         export_options_layout.addRow("Colour-bar decimal places:", self.export_colourbar_decimals_spin)
+        export_options_layout.addRow("Colour-bar label:", self.export_colourbar_label)
         export_options_layout.addRow("Point size:", self.export_point_size_spin)
         export_options_layout.addRow("X-axis label:", self.export_x_axis_name)
         export_options_layout.addRow("Y-axis label:", self.export_y_axis_name)
@@ -734,7 +756,8 @@ class ControlPanel(QWidget):
         for w in self.requires_selection_widgets:
             w.setEnabled(enable)
 
-    def set_error_map_display_state(self, available: bool, shown: bool = False, colour_mode: str = "closest_distance"):
+    def set_error_map_display_state(self, available: bool, shown: bool = False,
+                                    colour_mode: str = "closest_distance", heatmap_max: float = 0.0):
         """Synchronise the runtime-only error-map display control for a dataset."""
         self.analysis_display_group.setEnabled(available)
         self.show_error_map_check.blockSignals(True)
@@ -744,6 +767,12 @@ class ControlPanel(QWidget):
         mode_index = self.error_map_colour_mode_combo.findData(colour_mode)
         self.error_map_colour_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
         self.error_map_colour_mode_combo.blockSignals(False)
+        self.set_comparison_heatmap_max(heatmap_max)
+
+    def set_comparison_heatmap_max(self, maximum: float):
+        self.error_map_max_spin.blockSignals(True)
+        self.error_map_max_spin.setValue(float(maximum))
+        self.error_map_max_spin.blockSignals(False)
             
     def add_dataset_to_list(self, name: str, checked: bool = True):
         item = QListWidgetItem(name)
@@ -944,6 +973,7 @@ class ControlPanel(QWidget):
             "heightmap_colormap": self.export_heightmap_colormap_combo.currentText(),
             "colourbar_height": self.export_colourbar_height_spin.value(),
             "colourbar_decimals": self.export_colourbar_decimals_spin.value(),
+            "colourbar_label": self.export_colourbar_label.toPlainText(),
             "point_size": self.export_point_size_spin.value(),
             "x_label": self.export_x_axis_name.text() or "X",
             "y_label": self.export_y_axis_name.text() or "Y",
@@ -954,6 +984,7 @@ class ControlPanel(QWidget):
             "legend_position": self.export_legend_position_combo.currentData(),
             "legend_title": self.export_legend_title.text(),
             "legend_labels": labels,
+            "legend_labels_text": self.export_legend_labels.toPlainText(),
             # The renderer uses this ordered list, because an error-map cloud
             # can contribute more than one legend entry (for example, an
             # outside-cutoff group).  The name map above is kept so previously
@@ -969,6 +1000,7 @@ class ControlPanel(QWidget):
         self.export_heightmap_colormap_combo.setCurrentText(options.get("heightmap_colormap", "viridis"))
         self.export_colourbar_height_spin.setValue(float(options.get("colourbar_height", 1.0)))
         self.export_colourbar_decimals_spin.setValue(int(options.get("colourbar_decimals", 2)))
+        self.export_colourbar_label.setPlainText(options.get("colourbar_label", ""))
         self.export_point_size_spin.setValue(float(options.get("point_size", 2.0)))
         self.export_x_axis_name.setText(options.get("x_label", "X"))
         self.export_y_axis_name.setText(options.get("y_label", "Y"))
@@ -986,9 +1018,23 @@ class ControlPanel(QWidget):
         index = self.export_legend_position_combo.findData(position)
         self.export_legend_position_combo.setCurrentIndex(index if index >= 0 else 0)
         self.export_legend_title.setText(options.get("legend_title", ""))
-        labels = options.get("legend_labels", {})
-        if isinstance(labels, dict):
-            self.export_legend_labels.setPlainText("\n".join(str(label) for label in labels.values()))
+        if isinstance(options.get("legend_labels_text"), str):
+            self.export_legend_labels.setPlainText(options["legend_labels_text"])
+        elif isinstance(options.get("legend_label_lines"), list) and options["legend_label_lines"]:
+            lines = [str(line) for line in options["legend_label_lines"]]
+            labels = options.get("legend_labels", {})
+            if isinstance(labels, dict):
+                lines.extend(
+                    f"{name} = {label}" for name, label in labels.items()
+                    if str(label) not in lines
+                )
+            self.export_legend_labels.setPlainText("\n".join(lines))
+        else:
+            labels = options.get("legend_labels", {})
+            if isinstance(labels, dict):
+                self.export_legend_labels.setPlainText(
+                    "\n".join(f"{name} = {label}" for name, label in labels.items())
+                )
 
     def _on_save_export_settings_clicked(self):
         import json

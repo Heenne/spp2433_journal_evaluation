@@ -42,3 +42,21 @@ class CentringTests(unittest.TestCase):
         self.assertEqual(attributes, ["red"])
         np.testing.assert_allclose(loaded[["X", "Y", "Z"]].mean(), [0.0, 0.0, 0.0])
         np.testing.assert_array_equal(loaded["red"], [2, 9])
+
+    def test_large_csv_coordinates_keep_small_offsets_after_centring(self):
+        source = pd.DataFrame({
+            "X": [412734.475, 412734.489, 412734.507],
+            "Y": [5319054.600, 5319054.580, 5319054.560],
+            "Z": [290.48, 290.49, 290.50],
+        })
+
+        centred, centroid = centre_point_cloud(source)
+
+        self.assertEqual(centred["Y"].nunique(), 3)
+        np.testing.assert_allclose(
+            np.diff(centred[["X", "Y", "Z"]].to_numpy(), axis=0),
+            np.diff(source[["X", "Y", "Z"]].to_numpy(), axis=0),
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(centred[["X", "Y", "Z"]].mean(), [0, 0, 0], atol=1e-9)
+        np.testing.assert_allclose(centroid, source[["X", "Y", "Z"]].mean())

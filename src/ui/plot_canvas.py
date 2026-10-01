@@ -190,7 +190,6 @@ class PlotCanvas(FigureCanvas):
             z_min, z_max = min(z_min, z.min()), max(z_max, z.max())
             
             if error_map is not None:
-                cutoff = float(error_map["cutoff"])
                 distance_unit = error_map.get("unit", "mm")
                 in_overlap = np.isfinite(distances)
                 point_size = 8
@@ -199,14 +198,18 @@ class PlotCanvas(FigureCanvas):
                     mean = error_map.get("mean")
                     if colour_mode == "difference_from_mean" and mean is not None and np.isfinite(mean):
                         colour_values = distances[in_overlap] - float(mean)
-                        colour_limit = max(float(np.max(np.abs(colour_values))), np.finfo(float).eps)
+                        colour_limit = max(float(np.percentile(np.abs(colour_values), 95)), np.finfo(float).eps)
                         colour_kwargs = {"cmap": "coolwarm", "vmin": -colour_limit, "vmax": colour_limit}
                         colourbar_label = f"Closest-reference distance minus mean ({distance_unit})"
                         mean_marker = 0.0
                     else:
                         colour_values = distances[in_overlap]
-                        colour_kwargs = {"cmap": "turbo", "vmin": 0.0, "vmax": cutoff}
-                        colourbar_label = f"Unsigned distance to reference ({distance_unit})"
+                        manual_max = float(error_map.get("heatmap_max", 0.0))
+                        colour_limit = max(manual_max or float(error_map.get("p95") or np.percentile(colour_values, 95)),
+                                           np.finfo(float).eps)
+                        colour_kwargs = {"cmap": "turbo", "vmin": 0.0, "vmax": colour_limit}
+                        limit_label = "manual max" if manual_max else "P95"
+                        colourbar_label = f"Unsigned distance to reference ({distance_unit}; colours capped at {limit_label})"
                         mean_marker = mean
                     scatter = self.axes.scatter(
                         x[in_overlap], y[in_overlap], z[in_overlap], c=colour_values,
@@ -224,7 +227,7 @@ class PlotCanvas(FigureCanvas):
                 if np.any(~in_overlap):
                     self.axes.scatter(
                         x[~in_overlap], y[~in_overlap], z[~in_overlap], c="0.55", marker='.', s=point_size,
-                        label=f"{name} outside overlap", zorder=zorder, axlim_clip=True,
+                        label=f"{name} excluded from error statistics", zorder=zorder, axlim_clip=True,
                     )
                 if error_map.get("highlight_above_mean") and error_map.get("mean") is not None:
                     above_mean = in_overlap & (distances > float(error_map["mean"]))

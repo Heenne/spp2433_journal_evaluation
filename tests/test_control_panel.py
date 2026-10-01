@@ -51,11 +51,26 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         panel._on_calculate_error_clicked()
 
         self.assertEqual(len(received), 1)
-        self.assertEqual(received[0][:4], (0, 1, 1.0, 250_000))
+        self.assertEqual(received[0][:4], (0, 1, 1.0, 0))
         self.assertEqual(received[0][4:], (True, False, "closest_distance"))
         panel.comparison_colour_mode_combo.setCurrentIndex(1)
         panel._on_calculate_error_clicked()
         self.assertEqual(received[1][-1], "difference_from_mean")
+        panel.deleteLater()
+
+    def test_heatmap_max_can_be_set_after_surface_error(self):
+        panel = ControlPanel()
+        received = []
+        panel.error_map_max_changed.connect(received.append)
+        panel.add_dataset_to_list("project")
+        panel.add_dataset_to_list("reference")
+        self.assertTrue(panel.error_map_max_spin.isEnabled())
+        self.assertEqual(panel.error_map_max_spin.value(), 0.0)
+        panel.set_error_map_display_state(True, True, heatmap_max=2.5)
+        self.assertEqual(panel.error_map_max_spin.value(), 2.5)
+        self.assertEqual(received, [])
+        panel.error_map_max_spin.setValue(3.0)
+        self.assertEqual(received, [3.0])
         panel.deleteLater()
 
     def test_surface_error_has_separate_source_and_reference_selectors(self):
@@ -184,6 +199,30 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
             panel.get_export_options()["legend_labels"],
             {"reference": "Reference surface", "scan": "Measured cloud"},
         )
+        panel.deleteLater()
+
+    def test_export_settings_restore_every_legend_label_line(self):
+        import json
+
+        panel = ControlPanel()
+        panel.add_dataset_to_list("source")
+        original_text = "Source surface\nOutside reference range\nreference = Reference scan"
+        panel.export_legend_labels.setPlainText(original_text)
+        saved_options = json.loads(json.dumps(panel.get_export_options()))
+        self.assertEqual(saved_options["legend_labels_text"], original_text)
+
+        restored = ControlPanel()
+        restored.apply_export_options(saved_options)
+        self.assertEqual(restored.export_legend_labels.toPlainText(), original_text)
+
+        old_options = dict(saved_options)
+        old_options.pop("legend_labels_text")
+        restored.apply_export_options(old_options)
+        self.assertEqual(
+            restored.export_legend_labels.toPlainText(),
+            original_text,
+        )
+        restored.deleteLater()
         panel.deleteLater()
 
     def test_loading_clouds_adds_editable_legend_label_rows(self):

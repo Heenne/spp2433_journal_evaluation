@@ -17,8 +17,10 @@ def centre_point_cloud(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray]:
     centroid = points[finite].mean(axis=0)
     centred = df.copy()
     for index, column in enumerate(("X", "Y", "Z")):
-        # Keep the compact float32 representation used by the supplied PLYs.
-        centred[column] = (centred[column].astype(np.float32) - centroid[index]).astype(np.float32)
+        # Subtract in float64 first: large projected coordinates can lose
+        # centimetre-scale detail if rounded to float32 before centring.
+        values = df[column].to_numpy(dtype=np.float64, copy=False) - centroid[index]
+        centred[column] = values.astype(np.float32) if df[column].dtype == np.float32 else values
     return centred, centroid
 
 

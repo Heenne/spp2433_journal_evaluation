@@ -4,7 +4,8 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
     QMessageBox, QMenu, QApplication, QProgressBar, QPushButton, QSplitter,
-    QToolBar, QToolButton, QStyle, QDialog, QLabel
+    QToolBar, QToolButton, QStyle, QDialog, QLabel, QDialogButtonBox,
+    QFormLayout, QDoubleSpinBox, QCheckBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QPixmap
@@ -17,6 +18,7 @@ from src.data.filter import (
     filter_by_zscore, filter_by_bounding_box, filter_by_sor, filter_by_voxel_grid
 )
 from src.data.centering import centre_point_cloud, save_centred_point_cloud
+from src.data.pixel_scaling import save_pixel_scaled_copy
 from src.utils.registration import (
     run_icp, automatic_registration, global_automatic_registration, calculate_cloud_error,
     euler_translation_to_matrix, matrix_to_euler_translation, _comparison_footprint_masks,
@@ -86,6 +88,10 @@ class MainWindow(QMainWindow):
             style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "Convert TXT to CSV…", self.open_convert_dialog
         )
         toolbar_action(
+            style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
+            "Convert pixel coordinates to mm…", self.convert_selected_pixel_coordinates,
+        )
+        toolbar_action(
             style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon), "Select quick reference file…",
             self.select_quick_reference,
         )
@@ -140,6 +146,8 @@ class MainWindow(QMainWindow):
         self.control_panel.calculate_error_requested.connect(self.on_calculate_error)
         self.control_panel.error_map_display_changed.connect(self.on_error_map_display_changed)
         self.control_panel.error_map_colour_mode_changed.connect(self.on_error_map_colour_mode_changed)
+        self.control_panel.error_map_max_changed.connect(self.on_error_map_max_changed)
+        self.control_panel.comparison_source_combo.currentIndexChanged.connect(self._show_saved_comparison_for_source)
         self.control_panel.camera_view_requested.connect(self.on_camera_view_requested)
         self.control_panel.camera_rotate_requested.connect(self.on_camera_rotate_requested)
         self.control_panel.camera_angles_requested.connect(self.on_camera_angles_requested)
@@ -359,6 +367,7 @@ class MainWindow(QMainWindow):
                     normalized_entries.append({
                         "filepath": entry["filepath"],
                         "visible": bool(entry.get("visible", True)),
+                        "last_comparison": entry.get("last_comparison"),
                     })
 
             # Clear existing datasets.
@@ -369,6 +378,7 @@ class MainWindow(QMainWindow):
             # its data.  ``plot_datasets`` deliberately fits new data and
             # would otherwise replace the restored camera orientation.
             self._pending_project_camera_view = data.get("camera_view")
+            self._pending_project_comparisons = normalized_entries
             self._restore_project_camera_after_final_load = False
             
             # Load all files in the project
@@ -381,6 +391,7 @@ class MainWindow(QMainWindow):
 
             if not any(os.path.exists(entry["filepath"]) for entry in normalized_entries):
                 self._apply_pending_project_camera_view()
+                self._restore_saved_comparisons()
                     
             self.project_filepath = filepath
             self.set_project_dirty(False)
@@ -406,10 +417,48 @@ class MainWindow(QMainWindow):
                 "roll": self.plot_canvas.camera_angles()[2],
             },
             "datasets": [
-                {"filepath": dataset["filepath"], "visible": bool(dataset.get("visible", True))}
+                {
+                    "filepath": dataset["filepath"],
+                    "visible": bool(dataset.get("visible", True)),
+                    **({"last_comparison": dataset["last_comparison"]}
+                       if isinstance(dataset.get("last_comparison"), dict) else {}),
+                }
                 for dataset in self.datasets
             ],
         }
+
+    @staticmethod
+    def _comparison_input_signature(dataset):
+        """Capture the cloud file and settings used for a saved comparison."""
+        import json
+        stat = os.stat(dataset["filepath"])
+        return {
+            "filepath": os.path.abspath(dataset["filepath"]),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "settings": json.dumps(dataset["settings"], sort_keys=True),
+        }
+
+    def _restore_saved_comparisons(self):
+        entries = getattr(self, "_pending_project_comparisons", [])
+        self._pending_project_comparisons = []
+        by_path = {os.path.abspath(dataset["filepath"]): dataset for dataset in self.datasets}
+        for entry in entries:
+            report = entry.get("last_comparison")
+            if not isinstance(report, dict):
+                continue
+            source = by_path.get(os.path.abspath(entry["filepath"]))
+            reference = by_path.get(os.path.abspath(report.get("reference_filepath", "")))
+            if source is None or reference is None:
+                continue
+            try:
+                if (report.get("source_input") != self._comparison_input_signature(source)
+                        or report.get("reference_input") != self._comparison_input_signature(reference)):
+                    continue
+            except OSError:
+                continue
+            source["last_comparison"] = report
+        self._show_saved_comparison_for_source()
 
     def _apply_pending_project_camera_view(self):
         """Restore a saved project camera after its first data render.
@@ -555,6 +604,7 @@ class MainWindow(QMainWindow):
                 self.set_loading_state(False)
                 self._restore_project_camera_after_final_load = True
                 self.update_plot()
+                self._restore_saved_comparisons()
             
         def on_error(err_str):
             QMessageBox.critical(self, "Error", f"Failed to load file: {err_str}")
@@ -569,8 +619,16 @@ class MainWindow(QMainWindow):
         
     def remove_dataset(self, idx: int):
         if 0 <= idx < len(self.datasets):
+            removed_path = self.datasets[idx]["filepath"]
             del self.datasets[idx]
+            for dataset in self.datasets:
+                report = dataset.get("last_comparison")
+                if isinstance(report, dict) and report.get("reference_filepath") == removed_path:
+                    dataset.pop("last_comparison", None)
+                    dataset.pop("error_visualization", None)
+                    dataset.pop("show_error_visualization", None)
             self.control_panel.remove_dataset_from_list(idx)
+            self._show_saved_comparison_for_source()
             self.set_project_dirty(True)
             self.update_plot()
 
@@ -593,7 +651,21 @@ class MainWindow(QMainWindow):
                 "error_visualization" in dataset,
                 dataset.get("show_error_visualization", False),
                 dataset.get("error_visualization", {}).get("colour_mode", "closest_distance"),
+                dataset.get("error_visualization", {}).get(
+                    "heatmap_max", dataset.get("last_comparison", {}).get("heatmap_max", 0.0)
+                ),
             )
+            self._show_saved_comparison_for_source()
+
+    def _show_saved_comparison_for_source(self, *_):
+        idx = self.control_panel.comparison_source_combo.currentIndex()
+        report = self.datasets[idx].get("last_comparison") if 0 <= idx < len(self.datasets) else None
+        self.control_panel.set_comparison_heatmap_max(
+            report.get("heatmap_max", 0.0) if isinstance(report, dict) else 0.0
+        )
+        self.control_panel.set_comparison_summary(
+            self._format_error_report(report) if isinstance(report, dict) else "No comparison calculated yet."
+        )
             
     def on_visibility_toggled(self, idx: int, is_visible: bool):
         if 0 <= idx < len(self.datasets):
@@ -610,11 +682,13 @@ class MainWindow(QMainWindow):
             for dataset in self.datasets:
                 dataset.pop("error_visualization", None)
                 dataset.pop("show_error_visualization", None)
+                dataset.pop("last_comparison", None)
             st = self.control_panel.get_current_settings()
             self.datasets[idx]["settings"] = st
             save_filter_config(self.datasets[idx]["filepath"], st)
             self.set_project_dirty(True)
             self.control_panel.set_error_map_display_state(False)
+            self._show_saved_comparison_for_source()
             self.update_plot()
 
     def on_error_map_display_changed(self, shown: bool):
@@ -639,6 +713,24 @@ class MainWindow(QMainWindow):
         error_map["colour_mode"] = colour_mode
         if self.datasets[idx].get("show_error_visualization", False):
             self.plot_canvas.plot_datasets(self.datasets)
+
+    def on_error_map_max_changed(self, maximum: float):
+        idx = self.control_panel.comparison_source_combo.currentIndex()
+        if not (0 <= idx < len(self.datasets)):
+            return
+        dataset = self.datasets[idx]
+        changed = False
+        if isinstance(dataset.get("last_comparison"), dict):
+            dataset["last_comparison"]["heatmap_max"] = float(maximum)
+            changed = True
+        error_map = dataset.get("error_visualization")
+        if error_map is not None:
+            error_map["heatmap_max"] = float(maximum)
+            changed = True
+            if dataset.get("show_error_visualization", False):
+                self.plot_canvas.plot_datasets(self.datasets)
+        if changed:
+            self.set_project_dirty(True)
 
     def on_camera_view_requested(self, view_name: str):
         self.plot_canvas.set_standard_view(view_name)
@@ -845,6 +937,7 @@ class MainWindow(QMainWindow):
         for dataset in self.datasets:
             dataset.pop("error_visualization", None)
             dataset.pop("show_error_visualization", None)
+            dataset.pop("last_comparison", None)
         save_filter_config(source_dataset["filepath"], st)
         self.set_project_dirty(True)
         if self.control_panel.dataset_list.currentRow() == source_idx:
@@ -1056,17 +1149,35 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _format_error_report(report):
         unit = report.get("unit", "mm")
-        overlap = f"{report['overlap_fraction']:.1%} ({report['overlap_points']:,} points)"
+        p5 = report.get("p5")
+        p5_display = f"{p5:.6g} {unit}" if p5 is not None else "not saved; recalculate"
+        point_fraction = report.get("system_points_within_reference_area_fraction", report.get("overlap_fraction"))
+        point_count = report.get("system_points_within_reference_area", report.get("overlap_points"))
+        overlap = f"{point_fraction:.1%} ({point_count:,} of {report['source_points_total']:,} points)"
+        area_fraction = report.get("reference_area_covered_fraction")
+        area_display = f"{area_fraction:.1%}" if area_fraction is not None else (
+            "unavailable (no 2-D reference area)" if "reference_area_coverage_method" in report
+            else "not saved; recalculate"
+        )
         sampled = "yes" if report["source_points_sampled"] else "no"
-        if report["overlap_points"] == 0:
-            return (
-                f"Overlap: {overlap}\nNo points were within the cutoff of {report['overlap_cutoff']:.6g} {unit}. "
-                "Increase the cutoff or inspect the alignment."
+        coverage = (
+            f"System points within reference area [%]: {overlap}; outside reference area: {report['non_overlap_points']:,}\n"
+            f"Reference area covered [%]: {area_display}\n"
+            f"Error sample: {report['source_points_analysed']:,}; "
+            f"inside reference X/Y: {report['analysed_xy_overlap_points']:,}; "
+            f"used for statistics: {report['evaluated_points']:,}; "
+            f"edge excluded: {report['reference_edge_excluded_points']:,}\n"
+            f"Reference edge band excluded: {report.get('projected_edge_margin', 0.0):.6g} {unit}\n"
+        )
+        if report["evaluated_points"] == 0:
+            return coverage + (
+                "No points remain inside the reference area after edge exclusion. "
+                "Inspect the alignment and reference edge margin."
             )
-        return (
-            f"Overlap: {overlap}; outside overlap: {report['non_overlap_points']:,}\n"
-            f"Min: {report['minimum']:.6g} {unit}; mean: {report['mean']:.6g} {unit}; median: {report['median']:.6g} {unit}; "
-            f"RMSE: {report['rmse']:.6g} {unit}; P95: {report['p95']:.6g} {unit}; max: {report['maximum']:.6g} {unit}\n"
+        return coverage + (
+            f"P5: {p5_display}; median: {report['median']:.6g} {unit}; P95: {report['p95']:.6g} {unit}; "
+            f"mean: {report['mean']:.6g} {unit}; RMSE: {report['rmse']:.6g} {unit}; "
+            f"max: {report['maximum']:.6g} {unit}\n"
             f"Analysed {report['source_points_analysed']:,} source points (sampled: {sampled}); "
             f"indexed {report['reference_points_indexed']:,} reference points."
         )
@@ -1096,6 +1207,7 @@ class MainWindow(QMainWindow):
             return
         source_dataset = self.datasets[source_idx]
         target_dataset = self.datasets[target_idx]
+        requested_heatmap_max = float(self.control_panel.error_map_max_spin.value())
         self.set_loading_state(True, "Calculating surface error to reference...")
         self.comparison_worker = WorkerThread(
             self.run_comparison_background,
@@ -1112,6 +1224,10 @@ class MainWindow(QMainWindow):
             report, pointwise, source, target = result
             report["source_name"] = source["name"]
             report["reference_name"] = target["name"]
+            report["reference_filepath"] = target["filepath"]
+            report["source_input"] = self._comparison_input_signature(source)
+            report["reference_input"] = self._comparison_input_signature(target)
+            report["heatmap_max"] = requested_heatmap_max
             source["last_comparison"] = report
             for dataset in self.datasets:
                 dataset.pop("error_visualization", None)
@@ -1120,7 +1236,9 @@ class MainWindow(QMainWindow):
                 **pointwise,
                 "reference_name": target["name"],
                 "reference_filepath": target["filepath"],
-                "cutoff": report["overlap_cutoff"],
+                "edge_margin": report["reference_edge_margin_setting"],
+                "p95": report["p95"],
+                "heatmap_max": report["heatmap_max"],
                 "unit": report["unit"],
                 "mean": report["mean"],
                 "highlight_above_mean": highlight_above_mean,
@@ -1129,17 +1247,20 @@ class MainWindow(QMainWindow):
             source["show_error_visualization"] = show_error_map
             summary = self._format_error_report(report)
             self.control_panel.set_comparison_summary(summary)
+            self.set_project_dirty(True)
             self.set_loading_state(False, "Surface-error comparison complete.")
             self.plot_canvas.plot_datasets(self.datasets)
             if self.control_panel.dataset_list.currentRow() == source_idx:
-                self.control_panel.set_error_map_display_state(True, show_error_map, colour_mode)
+                self.control_panel.set_error_map_display_state(
+                    True, show_error_map, colour_mode, report["heatmap_max"]
+                )
             QMessageBox.information(
                 self,
                 "Surface Error Report",
                 f"{source['name']} -> {target['name']}\n\n{summary}\n\n"
                 f"Errors are unsigned nearest-reference distances in {report['unit']}. "
-                "Points outside the reference footprint or beyond the cutoff are excluded from the statistics."
-                + (" The plot now shows the analysed source points coloured by this distance; grey means outside the overlap."
+                "Points outside the reference footprint or its edge band are excluded from the statistics."
+                + (" The plot now shows the analysed source points coloured by this distance; grey points were excluded from error statistics."
                    if show_error_map else ""),
             )
 
@@ -1361,14 +1482,14 @@ class MainWindow(QMainWindow):
             reference_points = reference_points_cache[cache_key]
             if not len(reference_points):
                 raise RuntimeError(f"The reference cloud for '{dataset['name']}' has no points after filtering.")
-            source_footprint, reference_footprint, _details = _comparison_footprint_masks(
-                source_points, reference_points
+            source_footprint, reference_footprint, _coverage, _details = _comparison_footprint_masks(
+                source_points, reference_points,
+                edge_cutoff=float(error_map.get("edge_margin", error_map.get("cutoff", 1.0)))
             )
             comparison_reference_points = reference_points[reference_footprint]
             if not len(comparison_reference_points):
                 return np.full(len(source_points), np.inf, dtype=np.float64)
             tree = cKDTree(comparison_reference_points)
-            cutoff = float(error_map["cutoff"])
             distances = np.full(len(source_points), np.inf, dtype=np.float64)
             footprint_indices = np.flatnonzero(source_footprint)
             chunk_size = 100_000
@@ -1378,7 +1499,7 @@ class MainWindow(QMainWindow):
                 stop = min(start + chunk_size, len(footprint_indices))
                 indices = footprint_indices[start:stop]
                 distances[indices], _ = tree.query(
-                    source_points[indices], k=1, distance_upper_bound=cutoff, workers=-1
+                    source_points[indices], k=1, workers=-1
                 )
             return distances
 
@@ -1417,7 +1538,6 @@ class MainWindow(QMainWindow):
                 if progress_callback:
                     progress_callback(f"Calculating full-resolution error colours for {dataset['name']}...")
                 distances = full_resolution_error_distances(dataset, points, error_map)
-                cutoff = float(error_map["cutoff"])
                 in_overlap = np.isfinite(distances)
                 unit = error_map.get("unit", "mm")
                 if np.any(in_overlap):
@@ -1425,13 +1545,17 @@ class MainWindow(QMainWindow):
                     mean = error_map.get("mean")
                     if colour_mode == "difference_from_mean" and mean is not None and np.isfinite(mean):
                         values = distances[in_overlap] - float(mean)
-                        limit = max(float(np.max(np.abs(values))), np.finfo(float).eps)
+                        limit = max(float(np.percentile(np.abs(values), 95)), np.finfo(float).eps)
                         colour_kwargs = {"cmap": export_options.get("heatmap_colormap", "coolwarm"), "vmin": -limit, "vmax": limit}
-                        colourbar_label = f"Closest-reference distance minus mean ({unit})"
+                        colourbar_label = f"Closest-reference distance minus mean\n({unit})"
                     else:
                         values = distances[in_overlap]
-                        colour_kwargs = {"cmap": export_options.get("heatmap_colormap", "turbo"), "vmin": 0.0, "vmax": cutoff}
-                        colourbar_label = f"Unsigned distance to reference ({unit})"
+                        manual_max = float(error_map.get("heatmap_max", 0.0))
+                        limit = max(manual_max or float(error_map.get("p95") or np.percentile(values, 95)),
+                                    np.finfo(float).eps)
+                        colour_kwargs = {"cmap": export_options.get("heatmap_colormap", "turbo"), "vmin": 0.0, "vmax": limit}
+                        limit_label = "manual max" if manual_max else "P95"
+                        colourbar_label = f"Unsigned distance to reference\n({unit}; colours capped at {limit_label})"
                     scatter = axes.scatter(
                         points[in_overlap, 0], points[in_overlap, 1], points[in_overlap, 2], c=values,
                         marker=".", s=point_size,
@@ -1439,14 +1563,14 @@ class MainWindow(QMainWindow):
                         zorder=zorder, rasterized=rasterize_points, axlim_clip=True, **colour_kwargs,
                     )
                     figure.colorbar(
-                        scatter, ax=axes, label=colourbar_label, pad=0.1,
+                        scatter, ax=axes, label=export_options.get("colourbar_label") or colourbar_label, pad=0.1,
                         shrink=float(export_options.get("colourbar_height", 1.0)),
                         format=colourbar_format,
                     )
                 if np.any(~in_overlap):
                     axes.scatter(
                         points[~in_overlap, 0], points[~in_overlap, 1], points[~in_overlap, 2], c="0.55",
-                        marker=".", s=point_size, label=f"{display_label} outside overlap", zorder=zorder,
+                        marker=".", s=point_size, label=f"{display_label} excluded from error statistics", zorder=zorder,
                         rasterized=rasterize_points, axlim_clip=True,
                     )
                 error_maps_rendered += 1
@@ -1467,7 +1591,8 @@ class MainWindow(QMainWindow):
         if height_mappable is not None:
             unit = visible[0]["settings"].get("distance_unit", "mm")
             figure.colorbar(
-                height_mappable, ax=axes, label=f"Height / Z coordinate ({unit})", pad=0.1,
+                height_mappable, ax=axes,
+                label=export_options.get("colourbar_label") or f"Height / Z coordinate\n({unit})", pad=0.1,
                 shrink=float(export_options.get("colourbar_height", 1.0)),
                 format=colourbar_format,
             )
@@ -1741,6 +1866,97 @@ class MainWindow(QMainWindow):
         self.centre_worker.finished.connect(on_finished)
         self.centre_worker.error.connect(on_error)
         self.centre_worker.start()
+
+    def convert_selected_pixel_coordinates(self):
+        """Create a millimetre-coordinate copy of the selected raw cloud."""
+        idx = self.control_panel.dataset_list.currentRow()
+        if not 0 <= idx < len(self.datasets):
+            QMessageBox.information(self, "Pixel Coordinate Conversion", "Select a point cloud first.")
+            return
+        if hasattr(self, "pixel_scale_worker") and self.pixel_scale_worker.isRunning():
+            return
+
+        dataset = self.datasets[idx]
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Convert Pixel Coordinates to Millimetres")
+        form = QFormLayout(dialog)
+        ratio = QDoubleSpinBox(dialog)
+        ratio.setRange(0.000001, 1_000_000.0)
+        ratio.setDecimals(6)
+        ratio.setValue(2.1)
+        ratio.setSingleStep(0.1)
+        ratio.setToolTip("Pixels per millimetre supplied by the measurement system.")
+        form.addRow("Pixels per mm:", ratio)
+        pixel_size = QLabel(dialog)
+        form.addRow("Conversion factor:", pixel_size)
+        span_x = float(dataset["df"]["X"].max() - dataset["df"]["X"].min())
+        span_y = float(dataset["df"]["Y"].max() - dataset["df"]["Y"].min())
+        result_size = QLabel(dialog)
+        form.addRow("Resulting X/Y span:", result_size)
+
+        def update_preview(value):
+            pixel_size.setText(f"{value:g} pixels = 1 mm; multiply X/Y by {1.0 / value:.6f}")
+            result_size.setText(f"{span_x / value:.1f} × {span_y / value:.1f} mm")
+
+        ratio.valueChanged.connect(update_preview)
+        update_preview(ratio.value())
+        scale_z = QCheckBox("Z is also in pixels", dialog)
+        scale_z.setToolTip("Leave unchecked when Z is already a measured height in millimetres.")
+        form.addRow("Z coordinate:", scale_z)
+        info = QLabel("A new CSV copy is created from the selected cloud's raw coordinates. "
+                      "The original file and its manual transform remain unchanged.", dialog)
+        info.setWordWrap(True)
+        form.addRow(info)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create mm Copy")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        pixels_per_mm = ratio.value()
+        include_z = scale_z.isChecked()
+
+        source_path = dataset["filepath"]
+        stem = os.path.splitext(os.path.basename(source_path))[0]
+        suggested_path = os.path.join(os.path.dirname(source_path), f"{stem}_xy_mm.csv")
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Millimetre Point Cloud", suggested_path, "CSV Point Cloud (*.csv)"
+        )
+        if not filepath:
+            return
+        if not filepath.lower().endswith(".csv"):
+            filepath += ".csv"
+        if os.path.normcase(os.path.abspath(filepath)) == os.path.normcase(os.path.abspath(source_path)):
+            QMessageBox.warning(self, "Pixel Coordinate Conversion", "Choose a new file name to preserve the original.")
+            return
+        if any(os.path.normcase(os.path.abspath(cloud["filepath"])) == os.path.normcase(os.path.abspath(filepath))
+               for cloud in self.datasets):
+            QMessageBox.warning(self, "Pixel Coordinate Conversion", "Choose a file name that is not already loaded.")
+            return
+
+        self.set_loading_state(True, "Converting pixel coordinates to millimetres...")
+        self.pixel_scale_worker = WorkerThread(
+            save_pixel_scaled_copy, dataset["df"], filepath, pixels_per_mm, include_z
+        )
+
+        def on_finished(saved_path):
+            self.set_loading_state(False, f"Converted point cloud saved to {saved_path}")
+            dataset["visible"] = False
+            self.control_panel.dataset_list.blockSignals(True)
+            self.control_panel.dataset_list.item(idx).setCheckState(Qt.CheckState.Unchecked)
+            self.control_panel.dataset_list.blockSignals(False)
+            self.load_file(saved_path)
+
+        def on_error(error):
+            self.set_loading_state(False, "Pixel conversion failed.")
+            QMessageBox.critical(self, "Pixel Coordinate Conversion", str(error))
+
+        self.pixel_scale_worker.finished.connect(on_finished)
+        self.pixel_scale_worker.error.connect(on_error)
+        self.pixel_scale_worker.start()
 
     def closeEvent(self, event):
         """Offer Save / Discard / Cancel when project-owned state changed."""

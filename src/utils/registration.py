@@ -397,25 +397,112 @@ def _projected_xy_overlap_masks(source_points: np.ndarray, target_points: np.nda
     }
 
 
-def _comparison_footprint_masks(source_points: np.ndarray, reference_points: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Keep points inside the reference outline, including measured surface holes."""
-    if min(len(source_points), len(reference_points)) < 20:
-        # A few isolated samples cannot define a reliable surface footprint.
+def _reference_area_coverage(source_xy, reference_coverage, reference_origin, reference_cell_size):
+    """Integrate system support over equal-area reference-mask cell centres.
+
+    Locally supported Delaunay triangles connect irregularly spaced samples.
+    Long edges across missing regions are rejected using local sample spacing.
+    Integration retains the existing equal-area reference mask.
+    """
+    from scipy.ndimage import binary_dilation
+    from scipy.spatial import cKDTree, Delaunay, QhullError
+
+    reference_cells = np.argwhere(reference_coverage)
+    reference_area = len(reference_cells) * reference_cell_size ** 2
+    details = {
+        "reference_area": float(reference_area),
+        "reference_area_covered": 0.0,
+        "reference_area_covered_fraction": 0.0 if reference_area else None,
+        "coverage_reference_cell_size": float(reference_cell_size),
+        "coverage_system_cell_size": None,
+        "coverage_system_support_points": 0,
+        "coverage_system_simplification_cell_size": 0.0,
+        "coverage_triangle_edge_factor": 4.0,
+        "reference_area_coverage_method": "xy_local_delaunay_cell_centres_v2",
+    }
+    source_xy = np.unique(source_xy, axis=0)
+    span = np.ptp(source_xy, axis=0)
+    if len(source_xy) < 3 or np.min(span) <= 1e-9:
+        return details
+    # Bound triangulation memory for multi-million-point scans. Keep one actual
+    # sample per fine cell; this does not impose an occupied-cell area metric.
+    if len(source_xy) > 200_000:
+        cell_size = max(float(np.max(span)) / 1500.0,
+                        float(np.sqrt(np.prod(span) / 100_000.0)))
+        origin = np.min(source_xy, axis=0)
+        while True:
+            cells = np.floor((source_xy - origin) / cell_size).astype(np.int64)
+            _, indices = np.unique(cells, axis=0, return_index=True)
+            if len(indices) <= 200_000:
+                break
+            cell_size *= 1.5
+        source_xy = source_xy[np.sort(indices)]
+        details["coverage_system_simplification_cell_size"] = float(cell_size)
+    details["coverage_system_support_points"] = int(len(source_xy))
+    try:
+        triangles = Delaunay(source_xy)
+    except QhullError:
+        # Collinear projected samples cannot define a 2-D survey footprint.
+        return details
+    neighbours = min(7, len(source_xy))
+    distances, _ = cKDTree(source_xy).query(source_xy, k=neighbours, workers=-1)
+    # The median of up to six neighbours is stable against near-duplicates
+    # and reflects density near each vertex instead of across the whole scan.
+    local_spacing = np.median(distances[:, 1:], axis=1)
+    vertices = triangles.simplices
+    supported = np.ones(len(vertices), dtype=bool)
+    for a, b in ((0, 1), (1, 2), (2, 0)):
+        lengths = np.linalg.norm(source_xy[vertices[:, a]] - source_xy[vertices[:, b]], axis=1)
+        limits = details["coverage_triangle_edge_factor"] * np.minimum(
+            local_spacing[vertices[:, a]], local_spacing[vertices[:, b]]
+        )
+        supported &= lengths <= limits
+    # Include one neighbouring reference cell around the mask, so the small
+    # raster boundary tolerance also works at the outside of a reference edge.
+    integration_mask = binary_dilation(reference_coverage, structure=np.ones((3, 3), dtype=bool))
+    integration_cells = np.argwhere(integration_mask)
+    system_coverage = np.zeros_like(reference_coverage)
+    for start in range(0, len(integration_cells), 100_000):
+        cells = integration_cells[start:start + 100_000]
+        centres = reference_origin + (cells + 0.5) * reference_cell_size
+        simplex = triangles.find_simplex(centres)
+        inside = simplex >= 0
+        inside[inside] = supported[simplex[inside]]
+        cells = cells[inside]
+        system_coverage[cells[:, 0], cells[:, 1]] = True
+    # A one-cell tolerance compensates for the reference occupancy boundary
+    # extending past its outermost samples. It does not fill larger holes.
+    system_coverage = binary_dilation(system_coverage, structure=np.ones((3, 3), dtype=bool))
+    covered_count = int(np.count_nonzero(system_coverage & reference_coverage))
+    details.update({
+        "reference_area_covered": float(covered_count * reference_cell_size ** 2),
+        "reference_area_covered_fraction": float(covered_count / len(reference_cells)) if len(reference_cells) else None,
+    })
+    return details
+
+
+def _comparison_footprint_masks(source_points: np.ndarray, reference_points: np.ndarray,
+                                edge_cutoff: float = 0.0,
+                                include_area_coverage: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Keep the measured footprint interior while filling enclosed scan holes."""
+    if len(reference_points) < 3:
+        # One or two reference samples cannot define a surface footprint.
         return (
             np.ones(len(source_points), dtype=bool),
             np.ones(len(reference_points), dtype=bool),
-            {"projected_overlap_used": False},
+            np.ones(len(source_points), dtype=bool),
+            {"projected_overlap_used": False, "projected_coverage_points": len(source_points)},
         )
-    from scipy.spatial import ConvexHull, QhullError, cKDTree
+    from scipy.ndimage import binary_closing, binary_fill_holes, distance_transform_edt
+    from scipy.spatial import cKDTree
 
     reference_xy = np.asarray(reference_points, dtype=np.float64)[:, :2]
     source_xy = np.asarray(source_points, dtype=np.float64)[:, :2]
-    try:
-        outline_equations = ConvexHull(reference_xy).equations
-    except QhullError:
-        # A line-like diagnostic scan has no 2-D outline. For this case only,
-        # use local reference support to reject source extensions.
-        outline_equations = None
+    lower = np.min(reference_xy, axis=0)
+    span = np.ptp(reference_xy, axis=0)
+    if np.min(span) <= 1e-9:
+        # A line-like diagnostic scan has no 2-D interior.
+        coverage = None
         reference_tree = cKDTree(reference_xy)
         sample = reference_xy[np.linspace(0, len(reference_xy) - 1, min(len(reference_xy), 20_000), dtype=np.int64)]
         neighbour_distances, _ = reference_tree.query(sample, k=2, workers=-1)
@@ -423,25 +510,64 @@ def _comparison_footprint_masks(source_points: np.ndarray, reference_points: np.
         positive_spacings = positive_spacings[np.isfinite(positive_spacings) & (positive_spacings > 0)]
         spacing = float(np.percentile(positive_spacings, 95)) if len(positive_spacings) else 0.0
         support_radius = max(0.95 * spacing, 1e-6)
+        edge_margin = 0.0
+    else:
+        # A coarse occupancy grid follows a curved or slanted scan boundary.
+        # Closing connects adjacent measured cells; filling then preserves
+        # enclosed gaps so their 3-D error is still measured.
+        reference_tree = cKDTree(reference_xy)
+        spacing_sample = reference_xy[
+            np.linspace(0, len(reference_xy) - 1, min(len(reference_xy), 20_000), dtype=np.int64)
+        ]
+        neighbour_distances, _ = reference_tree.query(spacing_sample, k=2, workers=-1)
+        positive_spacings = neighbour_distances[:, 1]
+        positive_spacings = positive_spacings[np.isfinite(positive_spacings) & (positive_spacings > 0)]
+        spacing = float(np.percentile(positive_spacings, 95)) if len(positive_spacings) else 0.0
+        cell_size = max(0.5 * spacing, float(np.max(span)) / 1500.0,
+                        float(np.sqrt(np.prod(span) / 2_000_000.0)), 0.05)
+        origin = lower - 2.0 * cell_size
+        shape = tuple((np.ceil(span / cell_size).astype(int) + 5).tolist())
+        occupied = np.zeros(shape, dtype=bool)
+        reference_cells = np.floor((reference_xy - origin) / cell_size).astype(np.int64)
+        occupied[reference_cells[:, 0], reference_cells[:, 1]] = True
+        coverage = binary_fill_holes(binary_closing(occupied, structure=np.ones((3, 3), dtype=bool)))
+        edge_margin = min(max(float(edge_cutoff), 0.0), 0.02 * float(np.min(span)))
+        boundary_distance = distance_transform_edt(coverage) * cell_size if edge_margin else None
     source_mask = np.zeros(len(source_xy), dtype=bool)
+    coverage_mask = np.zeros(len(source_xy), dtype=bool)
+    coverage_count = 0
     for start in range(0, len(source_xy), 100_000):
         stop = min(start + 100_000, len(source_xy))
-        if outline_equations is not None:
-            chunk = source_xy[start:stop]
-            inside = np.ones(len(chunk), dtype=bool)
-            for a, b, c in outline_equations:
-                inside &= a * chunk[:, 0] + b * chunk[:, 1] + c <= 1e-9
-            source_mask[start:stop] = inside
+        if coverage is not None:
+            cells = np.floor((source_xy[start:stop] - origin) / cell_size).astype(np.int64)
+            valid = np.all((cells >= 0) & (cells < np.array(shape)), axis=1)
+            indices = np.flatnonzero(valid)
+            covered = coverage[cells[indices, 0], cells[indices, 1]]
+            coverage_mask[start + indices] = covered
+            coverage_count += int(np.count_nonzero(covered))
+            if edge_margin:
+                source_mask[start + indices] = (
+                    boundary_distance[cells[indices, 0], cells[indices, 1]] > edge_margin
+                )
+            else:
+                source_mask[start + indices] = coverage[cells[indices, 0], cells[indices, 1]]
         else:
             distances, _ = reference_tree.query(
                 source_xy[start:stop], k=1, distance_upper_bound=support_radius, workers=-1
             )
             source_mask[start:stop] = np.isfinite(distances)
-    return source_mask, np.ones(len(reference_xy), dtype=bool), {
+            coverage_mask[start:stop] = source_mask[start:stop]
+            coverage_count += int(np.count_nonzero(source_mask[start:stop]))
+    details = {
         "projected_overlap_used": True,
+        "projected_coverage_points": coverage_count,
         "projected_source_points": int(np.count_nonzero(source_mask)),
         "projected_reference_points": int(len(reference_xy)),
+        "projected_edge_margin": edge_margin,
     }
+    if include_area_coverage and coverage is not None:
+        details.update(_reference_area_coverage(source_xy, coverage, origin, cell_size))
+    return source_mask, np.ones(len(reference_xy), dtype=bool), coverage_mask, details
 
 
 def _manual_overlap_anchor_sets(source_points: np.ndarray, target_points: np.ndarray,
@@ -963,7 +1089,7 @@ def global_automatic_registration(source_df: pd.DataFrame, target_df: pd.DataFra
 
 
 def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
-                          max_distance: float, max_analysis_points: int = 250_000,
+                          max_distance: float, max_analysis_points: int = 0,
                           chunk_size: int = 100_000,
                           progress_callback: ProgressCallback = None,
                           is_cancelled_callback: CancelledCallback = None,
@@ -971,9 +1097,11 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
                           distance_unit: str = "mm"):
     """Calculate unsigned source-to-reference surface deviations.
 
-    Only source points within ``max_distance`` are included in the error
-    statistics. This treats areas outside the partial overlap as non-overlap,
-    rather than incorrectly reporting them as a geometric error.
+    System points within reference area is a point fraction; reference area
+    covered integrates equal-area X/Y mask cells. Both use the full clouds.
+    Error statistics use all nearest-reference distances
+    in that footprint after excluding the outer edge band. ``max_distance``
+    controls only the maximum width of that edge band.
     """
     from scipy.spatial import cKDTree
 
@@ -982,24 +1110,27 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
     if len(source_points) == 0 or len(reference_points) == 0:
         raise ValueError("Both point clouds need finite XYZ points for comparison.")
     if max_distance <= 0:
-        raise ValueError("The overlap/error cutoff must be greater than zero.")
+        raise ValueError("The reference edge margin must be greater than zero.")
 
     distance_unit = str(distance_unit).strip() or "mm"
     source_total = len(source_points)
+    source_footprint, reference_footprint, xy_coverage, footprint_details = _comparison_footprint_masks(
+        source_points, reference_points, edge_cutoff=max_distance, include_area_coverage=True
+    )
     max_analysis_points = int(max_analysis_points)
     sampled = False
     if max_analysis_points > 0 and len(source_points) > max_analysis_points:
         # A fixed seed gives repeatable reports for the same data and settings.
         indices = np.random.default_rng(20260820).choice(len(source_points), max_analysis_points, replace=False)
         source_points = source_points[indices]
+        source_footprint = source_footprint[indices]
+        analysed_xy_coverage = xy_coverage[indices]
         sampled = True
+    else:
+        analysed_xy_coverage = xy_coverage
 
-    # A 3-D distance cutoff alone can accept a narrow unsupported scan edge.
-    # Check the reference's projected outline first, without cropping valid
-    # corners or treating small gaps in the measurement as outside coverage.
-    source_footprint, reference_footprint, footprint_details = _comparison_footprint_masks(
-        source_points, reference_points
-    )
+    # Check measured X-Y coverage and leave out a narrow outer boundary band.
+    # Enclosed gaps remain candidates even when their 3-D error is large.
     comparison_reference_points = reference_points[reference_footprint]
     if not len(comparison_reference_points):
         comparison_reference_points = reference_points
@@ -1022,13 +1153,16 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
         stop = min(start + max(1, int(chunk_size)), len(footprint_indices))
         indices = footprint_indices[start:stop]
         distances[indices], _ = reference_tree.query(
-            source_points[indices], k=1, distance_upper_bound=max_distance, workers=-1
+            source_points[indices], k=1, workers=-1
         )
         _emit(progress_callback, f"Comparing surface distances: {stop:,} / {len(footprint_indices):,} footprint points...")
 
-    in_overlap = np.isfinite(distances)
-    overlap_distances = distances[in_overlap]
-    overlap_count = int(len(overlap_distances))
+    valid_error = np.isfinite(distances)
+    overlap_distances = distances[valid_error]
+    evaluated_count = int(len(overlap_distances))
+    xy_overlap_count = int(footprint_details["projected_coverage_points"])
+    analysed_xy_overlap_count = int(np.count_nonzero(analysed_xy_coverage))
+    inside_edge_count = int(np.count_nonzero(source_footprint))
     report = {
         "metric": "unsigned nearest-reference Euclidean distance",
         "unit": distance_unit,
@@ -1036,30 +1170,55 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
         "source_points_analysed": int(len(source_points)),
         "source_points_sampled": sampled,
         "reference_points_indexed": int(len(comparison_reference_points)),
-        "overlap_cutoff": float(max_distance),
+        "reference_edge_margin_setting": float(max_distance),
         "projected_footprint_used": bool(footprint_details.get("projected_overlap_used", False)),
-        "projected_non_overlap_points": int(len(source_points) - np.count_nonzero(source_footprint)),
-        "overlap_points": overlap_count,
-        "non_overlap_points": int(len(source_points) - overlap_count),
-        "overlap_fraction": float(overlap_count / len(source_points)),
+        "projected_edge_margin": float(footprint_details.get("projected_edge_margin", 0.0)),
+        "projected_non_overlap_points": int(source_total - xy_overlap_count),
+        "analysed_xy_overlap_points": analysed_xy_overlap_count,
+        "reference_edge_excluded_points": int(analysed_xy_overlap_count - inside_edge_count),
+        "overlap_points": xy_overlap_count,
+        "non_overlap_points": int(source_total - xy_overlap_count),
+        "overlap_fraction": float(xy_overlap_count / source_total),
+        # Legacy aliases above remain readable in previously saved projects.
+        "system_points_within_reference_area": xy_overlap_count,
+        "system_points_outside_reference_area": int(source_total - xy_overlap_count),
+        "system_points_within_reference_area_fraction": float(xy_overlap_count / source_total),
+        "reference_area_covered_fraction": footprint_details.get("reference_area_covered_fraction"),
+        "reference_area": footprint_details.get("reference_area"),
+        "reference_area_covered": footprint_details.get("reference_area_covered"),
+        "area_unit": f"{distance_unit}²",
+        "coverage_reference_cell_size": footprint_details.get("coverage_reference_cell_size"),
+        "coverage_system_cell_size": footprint_details.get("coverage_system_cell_size"),
+        "coverage_system_support_points": footprint_details.get("coverage_system_support_points"),
+        "coverage_system_simplification_cell_size": footprint_details.get("coverage_system_simplification_cell_size"),
+        "coverage_triangle_edge_factor": footprint_details.get("coverage_triangle_edge_factor"),
+        "reference_area_coverage_method": footprint_details.get("reference_area_coverage_method", "unavailable_no_2d_reference_area"),
+        "evaluated_points": evaluated_count,
+        "evaluated_fraction": float(evaluated_count / len(source_points)),
     }
-    if overlap_count:
+    if evaluated_count:
         report.update({
             "minimum": float(np.min(overlap_distances)),
             "mean": float(np.mean(overlap_distances)),
             "median": float(np.median(overlap_distances)),
+            "p5": float(np.percentile(overlap_distances, 5)),
             "rmse": float(np.sqrt(np.mean(np.square(overlap_distances)))),
             "p95": float(np.percentile(overlap_distances, 95)),
             "maximum": float(np.max(overlap_distances)),
         })
     else:
-        report.update({"minimum": None, "mean": None, "median": None, "rmse": None, "p95": None, "maximum": None})
-    _emit(progress_callback, f"Comparison complete: {report['overlap_fraction']:.1%} overlap.")
+        report.update({"minimum": None, "mean": None, "median": None, "p5": None,
+                       "rmse": None, "p95": None, "maximum": None})
+    area_fraction = report["reference_area_covered_fraction"]
+    area_display = f"{area_fraction:.1%}" if area_fraction is not None else "unavailable (no 2-D reference area)"
+    _emit(progress_callback, f"Comparison complete: System points within reference area: "
+          f"{report['system_points_within_reference_area_fraction']:.1%}; Reference area covered: {area_display}; "
+          f"{evaluated_count:,} points evaluated for error.")
     if include_pointwise:
         # Keep the plotting data separate from the compact numeric report. The
         # source points are exactly the ones reported as analysed (including a
         # deterministic analysis sample, when one was requested); ``inf``
-        # distances denote non-overlap beyond the cutoff.
+        # distances denote points excluded by the footprint or edge band.
         return report, {
             "points": source_points,
             "distances": distances,
