@@ -21,9 +21,14 @@ from src.data.centering import centre_point_cloud, save_centred_point_cloud
 from src.data.pixel_scaling import save_pixel_scaled_copy
 from src.utils.registration import (
     run_icp, automatic_registration, global_automatic_registration, calculate_cloud_error,
-    euler_translation_to_matrix, matrix_to_euler_translation, _comparison_footprint_masks,
+    euler_translation_to_matrix, matrix_to_euler_translation,
 )
 from src.utils.worker import WorkerThread
+from src.utils.error_mapping import error_map_colours
+from src.utils.error_report import update_report_metrics, interval, number
+from src.ui.error_report_dialog import ErrorReportDialog
+from src.ui.application_identity import application_icon
+from src.utils.export_layout import layout_export_z_axis
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 
 
@@ -38,6 +43,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("3D Point Cloud Data Viewer")
+        self.setWindowIcon(application_icon())
         self.resize(1100, 750)
         
         self.datasets = []
@@ -147,6 +153,8 @@ class MainWindow(QMainWindow):
         self.control_panel.error_map_display_changed.connect(self.on_error_map_display_changed)
         self.control_panel.error_map_colour_mode_changed.connect(self.on_error_map_colour_mode_changed)
         self.control_panel.error_map_max_changed.connect(self.on_error_map_max_changed)
+        self.control_panel.surface_error_settings_changed.connect(self.on_surface_error_settings_changed)
+        self.control_panel.comparison_report_requested.connect(self.show_surface_error_report)
         self.control_panel.comparison_source_combo.currentIndexChanged.connect(self._show_saved_comparison_for_source)
         self.control_panel.camera_view_requested.connect(self.on_camera_view_requested)
         self.control_panel.camera_rotate_requested.connect(self.on_camera_rotate_requested)
@@ -368,6 +376,7 @@ class MainWindow(QMainWindow):
                         "filepath": entry["filepath"],
                         "visible": bool(entry.get("visible", True)),
                         "last_comparison": entry.get("last_comparison"),
+                        "surface_error_settings": entry.get("surface_error_settings"),
                     })
 
             # Clear existing datasets.
@@ -379,6 +388,7 @@ class MainWindow(QMainWindow):
             # would otherwise replace the restored camera orientation.
             self._pending_project_camera_view = data.get("camera_view")
             self._pending_project_comparisons = normalized_entries
+            self._pending_surface_error_source = data.get("surface_error_source_filepath")
             self._restore_project_camera_after_final_load = False
             
             # Load all files in the project
@@ -409,8 +419,12 @@ class MainWindow(QMainWindow):
 
     def _project_data(self):
         """Serialize project-owned state, including layer order and visibility."""
+        panel = getattr(self, "control_panel", None)
+        source_idx = panel.comparison_source_combo.currentIndex() if panel is not None else -1
         return {
             "format_version": 3,
+            **({"surface_error_source_filepath": self.datasets[source_idx]["filepath"]}
+               if 0 <= source_idx < len(self.datasets) else {}),
             "camera_view": {
                 "elevation": self.plot_canvas.camera_angles()[0],
                 "azimuth": self.plot_canvas.camera_angles()[1],
@@ -422,6 +436,8 @@ class MainWindow(QMainWindow):
                     "visible": bool(dataset.get("visible", True)),
                     **({"last_comparison": dataset["last_comparison"]}
                        if isinstance(dataset.get("last_comparison"), dict) else {}),
+                    **({"surface_error_settings": dataset["surface_error_settings"]}
+                       if isinstance(dataset.get("surface_error_settings"), dict) else {}),
                 }
                 for dataset in self.datasets
             ],
@@ -444,10 +460,24 @@ class MainWindow(QMainWindow):
         self._pending_project_comparisons = []
         by_path = {os.path.abspath(dataset["filepath"]): dataset for dataset in self.datasets}
         for entry in entries:
+            source = by_path.get(os.path.abspath(entry["filepath"]))
+            if source is None:
+                continue
             report = entry.get("last_comparison")
+            options = entry.get("surface_error_settings")
+            if isinstance(options, dict):
+                source["surface_error_settings"] = dict(options)
+            elif isinstance(report, dict):
+                # Preserve legacy settings even if the numerical report is stale.
+                source["surface_error_settings"] = {
+                    **report.get("calculation_settings", {}),
+                    "axial_range": report.get("axial_range") or 0.0,
+                    "heatmap_max": report.get("heatmap_max", 0.0),
+                    "edge_margin": report.get("reference_edge_margin_setting", 1.0),
+                    "reference_filepath": report.get("reference_filepath"),
+                }
             if not isinstance(report, dict):
                 continue
-            source = by_path.get(os.path.abspath(entry["filepath"]))
             reference = by_path.get(os.path.abspath(report.get("reference_filepath", "")))
             if source is None or reference is None:
                 continue
@@ -458,6 +488,13 @@ class MainWindow(QMainWindow):
             except OSError:
                 continue
             source["last_comparison"] = report
+        source_path = getattr(self, "_pending_surface_error_source", None)
+        self._pending_surface_error_source = None
+        if source_path:
+            for index, dataset in enumerate(self.datasets):
+                if os.path.abspath(dataset["filepath"]) == os.path.abspath(source_path):
+                    self.control_panel.comparison_source_combo.setCurrentIndex(index)
+                    break
         self._show_saved_comparison_for_source()
 
     def _apply_pending_project_camera_view(self):
@@ -627,7 +664,11 @@ class MainWindow(QMainWindow):
                     dataset.pop("last_comparison", None)
                     dataset.pop("error_visualization", None)
                     dataset.pop("show_error_visualization", None)
-            self.control_panel.remove_dataset_from_list(idx)
+            self._updating_surface_error_selectors = True
+            try:
+                self.control_panel.remove_dataset_from_list(idx)
+            finally:
+                self._updating_surface_error_selectors = False
             self._show_saved_comparison_for_source()
             self.set_project_dirty(True)
             self.update_plot()
@@ -636,9 +677,20 @@ class MainWindow(QMainWindow):
         """Reorder data and selectors; the first list entry is the top render layer."""
         if not (0 <= old_idx < len(self.datasets) and 0 <= new_idx < len(self.datasets)):
             return
+        source_idx = self.control_panel.comparison_source_combo.currentIndex()
+        source = self.datasets[source_idx] if 0 <= source_idx < len(self.datasets) else None
         dataset = self.datasets.pop(old_idx)
         self.datasets.insert(new_idx, dataset)
-        self.control_panel.move_dataset_in_list(old_idx, new_idx)
+        self._updating_surface_error_selectors = True
+        try:
+            self.control_panel.move_dataset_in_list(old_idx, new_idx)
+            if source is not None:
+                self.control_panel.comparison_source_combo.setCurrentIndex(
+                    next(index for index, candidate in enumerate(self.datasets) if candidate is source)
+                )
+        finally:
+            self._updating_surface_error_selectors = False
+        self._show_saved_comparison_for_source()
         self.set_project_dirty(True)
         self.update_plot()
             
@@ -658,14 +710,65 @@ class MainWindow(QMainWindow):
             self._show_saved_comparison_for_source()
 
     def _show_saved_comparison_for_source(self, *_):
+        if getattr(self, "_updating_surface_error_selectors", False):
+            return
         idx = self.control_panel.comparison_source_combo.currentIndex()
-        report = self.datasets[idx].get("last_comparison") if 0 <= idx < len(self.datasets) else None
-        self.control_panel.set_comparison_heatmap_max(
-            report.get("heatmap_max", 0.0) if isinstance(report, dict) else 0.0
+        dataset = self.datasets[idx] if 0 <= idx < len(self.datasets) else {}
+        report = dataset.get("last_comparison")
+        options = dataset.get("surface_error_settings", {})
+        if not options and isinstance(report, dict):
+            options = {**report.get("calculation_settings", {}),
+                       "heatmap_max": report.get("heatmap_max", 0.0),
+                       "axial_range": report.get("axial_range") or 0.0,
+                       "edge_margin": report.get("reference_edge_margin_setting", 1.0),
+                       "reference_filepath": report.get("reference_filepath")}
+        reference_path = options.get("reference_filepath")
+        reference_idx = next(
+            (index for index, candidate in enumerate(self.datasets)
+             if index != idx and reference_path
+             and os.path.abspath(candidate["filepath"]) == os.path.abspath(reference_path)), None
         )
-        self.control_panel.set_comparison_summary(
-            self._format_error_report(report) if isinstance(report, dict) else "No comparison calculated yet."
-        )
+        self.control_panel.apply_surface_error_options(options, reference_idx)
+        self._refresh_comparison_report()
+
+    def _refresh_comparison_report(self):
+        panel = self.control_panel
+        idx = panel.comparison_source_combo.currentIndex()
+        dataset = self.datasets[idx] if 0 <= idx < len(self.datasets) else {}
+        options = panel.get_surface_error_options()
+        reference_idx = panel.comparison_target_combo.currentIndex()
+        if 0 <= reference_idx < len(self.datasets):
+            options["reference_filepath"] = self.datasets[reference_idx]["filepath"]
+        panel.set_comparison_report(dataset.get("last_comparison"), options)
+
+    def show_surface_error_report(self, source_filepath=None):
+        if not any(isinstance(dataset.get("last_comparison"), dict) for dataset in self.datasets):
+            return
+        current_dialog = getattr(self, "_surface_error_dialog", None)
+        if current_dialog is not None:
+            current_dialog.raise_()
+            current_dialog.activateWindow()
+            return
+        idx = self.control_panel.comparison_source_combo.currentIndex()
+        if source_filepath is None and 0 <= idx < len(self.datasets):
+            source_filepath = self.datasets[idx]["filepath"]
+        self.plot_canvas.finish_pending_draw()
+        dialog = ErrorReportDialog(self.datasets, source_filepath, self._format_error_report, self)
+        dialog.prepare_for_display()
+        self.plot_canvas.pause_rendering()
+        self._surface_error_dialog = dialog
+
+        def on_closed(_result):
+            self._surface_error_dialog = None
+            self.plot_canvas.resume_rendering()
+            dialog.deleteLater()
+
+        dialog.finished.connect(on_closed)
+        # Return from the worker's completion callback before the dialog's
+        # event loop runs. Parent layout/resize events can queue fresh costly
+        # plot renders even after finish_pending_draw(), so defer them until
+        # this window closes as well.
+        dialog.open()
             
     def on_visibility_toggled(self, idx: int, is_visible: bool):
         if 0 <= idx < len(self.datasets):
@@ -723,14 +826,43 @@ class MainWindow(QMainWindow):
         if isinstance(dataset.get("last_comparison"), dict):
             dataset["last_comparison"]["heatmap_max"] = float(maximum)
             changed = True
-        error_map = dataset.get("error_visualization")
-        if error_map is not None:
-            error_map["heatmap_max"] = float(maximum)
-            changed = True
-            if dataset.get("show_error_visualization", False):
-                self.plot_canvas.plot_datasets(self.datasets)
         if changed:
             self.set_project_dirty(True)
+        self.on_surface_error_settings_changed()
+
+    def on_surface_error_settings_changed(self):
+        """Keep comparison configuration independently of computed results."""
+        if (getattr(self, "_pending_project_comparisons", [])
+                or getattr(self, "_updating_surface_error_selectors", False)):
+            return
+        panel = self.control_panel
+        source_idx = panel.comparison_source_combo.currentIndex()
+        if not (0 <= source_idx < len(self.datasets)):
+            return
+        dataset = self.datasets[source_idx]
+        options = panel.get_surface_error_options()
+        reference_idx = panel.comparison_target_combo.currentIndex()
+        if 0 <= reference_idx < len(self.datasets) and reference_idx != source_idx:
+            options["reference_filepath"] = self.datasets[reference_idx]["filepath"]
+        if options != dataset.get("surface_error_settings"):
+            dataset["surface_error_settings"] = options
+            self.set_project_dirty(True)
+        if isinstance(dataset.get("last_comparison"), dict):
+            update_report_metrics(dataset["last_comparison"], options["axial_range"])
+        self._refresh_comparison_report()
+        error_map = dataset.get("error_visualization")
+        if error_map is not None:
+            # Changing the metric/normal parameters takes effect on calculation.
+            # Only display bounds may change an already calculated map.
+            display_settings = {key: options[key] for key in ("scale_mode", "heatmap_min", "heatmap_max")}
+            if any(error_map.get(key) != value for key, value in display_settings.items()):
+                try:
+                    error_map_colours(np.array([-1.0, 1.0]), {**error_map, **display_settings})
+                except ValueError:
+                    return  # Permit intermediate edits until both limits are valid.
+                error_map.update(display_settings)
+                if dataset.get("show_error_visualization", False):
+                    self.plot_canvas.plot_datasets(self.datasets)
 
     def on_camera_view_requested(self, view_name: str):
         self.plot_canvas.set_standard_view(view_name)
@@ -942,6 +1074,7 @@ class MainWindow(QMainWindow):
         self.set_project_dirty(True)
         if self.control_panel.dataset_list.currentRow() == source_idx:
             self.control_panel.apply_config(st)
+        self._refresh_comparison_report()
         return preset_name
 
     def run_auto_alignment_background(self, source_dataset, target_dataset, max_registration_points,
@@ -1149,8 +1282,6 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _format_error_report(report):
         unit = report.get("unit", "mm")
-        p5 = report.get("p5")
-        p5_display = f"{p5:.6g} {unit}" if p5 is not None else "not saved; recalculate"
         point_fraction = report.get("system_points_within_reference_area_fraction", report.get("overlap_fraction"))
         point_count = report.get("system_points_within_reference_area", report.get("overlap_points"))
         overlap = f"{point_fraction:.1%} ({point_count:,} of {report['source_points_total']:,} points)"
@@ -1171,19 +1302,31 @@ class MainWindow(QMainWindow):
         )
         if report["evaluated_points"] == 0:
             return coverage + (
-                "No points remain inside the reference area after edge exclusion. "
-                "Inspect the alignment and reference edge margin."
+                "No valid points remain for error statistics. Inspect alignment, reference edge margin, "
+                "and (in signed mode) normal radius and orientation. "
+                f"Points without a supported normal: {report.get('normal_invalid_points', 0):,}."
             )
         return coverage + (
-            f"P5: {p5_display}; median: {report['median']:.6g} {unit}; P95: {report['p95']:.6g} {unit}; "
-            f"mean: {report['mean']:.6g} {unit}; RMSE: {report['rmse']:.6g} {unit}; "
-            f"max: {report['maximum']:.6g} {unit}\n"
-            f"Analysed {report['source_points_analysed']:,} source points (sampled: {sampled}); "
+            f"Metric: {report.get('metric', 'unsigned nearest-reference Euclidean distance')}\n"
+            f"[P5; P95] (central 90%): {interval(report)}\n"
+            f"[P2.5; P97.5] (central 95%): {interval(report, 'p2_5', 'p97_5')}\n"
+            f"Sample standard deviation (N-1): {number(report.get('standard_deviation'))} {unit}\n"
+            f"Axial measurement span: {number(report.get('axial_range'))} {unit}\n"
+            + (f"Normalized SD (100 × SD / axial span): {number(report['normalized_standard_deviation_percent'])} %\n"
+               if report.get("normalized_standard_deviation_percent") is not None else
+               "Normalized SD: unavailable; enter axial range (SD also requires at least two points)\n")
+            + f"Mean: {number(report.get('mean'))} {unit}; RMSE: {number(report.get('rmse'))} {unit}; "
+              f"min/max: {number(report.get('minimum'))} / {number(report.get('maximum'))} {unit}\n"
+            + (f"Normal orientation: {report.get('normal_orientation')}; "
+               f"effective radius: {report.get('normal_radius_effective', 0):.6g} {unit}; "
+               f"unsupported normals excluded: {report.get('normal_invalid_points', 0):,}\n"
+               if report.get("error_method") == "signed_normal" else "")
+            + f"Analysed {report['source_points_analysed']:,} source points (sampled: {sampled}); "
             f"indexed {report['reference_points_indexed']:,} reference points."
         )
 
     def run_comparison_background(self, source_dataset, target_dataset, cutoff, max_analysis_points,
-                                  progress_callback=None, is_cancelled_callback=None):
+                                  progress_callback=None, is_cancelled_callback=None, calculation_options=None):
         if progress_callback:
             progress_callback("Preparing point clouds for surface-error calculation...")
         source_df = self._apply_quality_filters(source_dataset)
@@ -1197,6 +1340,7 @@ class MainWindow(QMainWindow):
             is_cancelled_callback=is_cancelled_callback,
             include_pointwise=True,
             distance_unit=source_dataset["settings"].get("distance_unit", "mm"),
+            **(calculation_options or {}),
         )
         return report, pointwise, source_dataset, target_dataset
 
@@ -1208,6 +1352,16 @@ class MainWindow(QMainWindow):
         source_dataset = self.datasets[source_idx]
         target_dataset = self.datasets[target_idx]
         requested_heatmap_max = float(self.control_panel.error_map_max_spin.value())
+        requested_options = (self.control_panel.get_surface_error_options()
+                             if hasattr(self.control_panel, "get_surface_error_options") else {})
+        try:
+            error_map_colours(np.array([-1.0, 1.0]), {**requested_options, "heatmap_max": requested_heatmap_max})
+        except ValueError as error:
+            QMessageBox.warning(self, "Heatmap Scale", str(error))
+            return
+        calculation_options = {key: requested_options[key] for key in
+                               ("error_method", "normal_radius", "normal_neighbours", "normal_orientation", "axial_range")
+                               if key in requested_options}
         self.set_loading_state(True, "Calculating surface error to reference...")
         self.comparison_worker = WorkerThread(
             self.run_comparison_background,
@@ -1215,6 +1369,7 @@ class MainWindow(QMainWindow):
             target_dataset,
             cutoff,
             max_analysis_points,
+            calculation_options=calculation_options,
             inject_progress=True,
             inject_cancelled=True,
         )
@@ -1225,15 +1380,28 @@ class MainWindow(QMainWindow):
             report["source_name"] = source["name"]
             report["reference_name"] = target["name"]
             report["reference_filepath"] = target["filepath"]
+            report.setdefault("calculation_settings", {})["reference_filepath"] = target["filepath"]
             report["source_input"] = self._comparison_input_signature(source)
             report["reference_input"] = self._comparison_input_signature(target)
             report["heatmap_max"] = requested_heatmap_max
             source["last_comparison"] = report
+            source["surface_error_settings"] = {
+                **requested_options,
+                "reference_filepath": target["filepath"],
+                "edge_margin": cutoff,
+                "max_analysis_points": max_analysis_points,
+                "colour_mode": colour_mode,
+                "heatmap_max": requested_heatmap_max,
+                "show_error_map": show_error_map,
+                "highlight_above_mean": highlight_above_mean,
+            }
             for dataset in self.datasets:
                 dataset.pop("error_visualization", None)
                 dataset.pop("show_error_visualization", None)
             source["error_visualization"] = {
+                **requested_options,
                 **pointwise,
+                "error_method": report.get("error_method", "unsigned"),
                 "reference_name": target["name"],
                 "reference_filepath": target["filepath"],
                 "edge_margin": report["reference_edge_margin_setting"],
@@ -1245,24 +1413,19 @@ class MainWindow(QMainWindow):
                 "colour_mode": colour_mode,
             }
             source["show_error_visualization"] = show_error_map
-            summary = self._format_error_report(report)
-            self.control_panel.set_comparison_summary(summary)
+            self._refresh_comparison_report()
             self.set_project_dirty(True)
-            self.set_loading_state(False, "Surface-error comparison complete.")
+            self.statusBar().showMessage("Error statistics ready — preparing interactive point-cloud preview...")
+            self.statusBar().repaint()
             self.plot_canvas.plot_datasets(self.datasets)
             if self.control_panel.dataset_list.currentRow() == source_idx:
                 self.control_panel.set_error_map_display_state(
                     True, show_error_map, colour_mode, report["heatmap_max"]
                 )
-            QMessageBox.information(
-                self,
-                "Surface Error Report",
-                f"{source['name']} -> {target['name']}\n\n{summary}\n\n"
-                f"Errors are unsigned nearest-reference distances in {report['unit']}. "
-                "Points outside the reference footprint or its edge band are excluded from the statistics."
-                + (" The plot now shows the analysed source points coloured by this distance; grey points were excluded from error statistics."
-                   if show_error_map else ""),
-            )
+            self.plot_canvas.finish_pending_draw()
+            preview_summary = getattr(self.plot_canvas, "preview_summary", lambda: "")()
+            self.set_loading_state(False, "Surface-error comparison and preview ready. " + preview_summary)
+            self.show_surface_error_report(source["filepath"])
 
         def on_error(err_str):
             self.set_loading_state(False)
@@ -1429,6 +1592,23 @@ class MainWindow(QMainWindow):
         axes = figure.add_subplot(111, projection="3d")
         export_options = export_options or {}
         colourbar_format = f"%.{int(export_options.get('colourbar_decimals', 2))}f"
+        axis_label_font_size = float(export_options.get("axis_label_font_size", 10.0))
+        axis_tick_font_size = float(export_options.get("axis_tick_font_size", 10.0))
+
+        def add_colourbar(mappable, label):
+            colourbar = figure.colorbar(
+                mappable, ax=axes, pad=0.1,
+                shrink=float(export_options.get("colourbar_height", 1.0)),
+                format=colourbar_format,
+            )
+            colourbar.set_label(
+                export_options.get("colourbar_label") or label,
+                fontsize=float(export_options.get("colourbar_label_font_size", 10.0)),
+            )
+            tick_font_size = float(export_options.get("colourbar_tick_font_size", 10.0))
+            colourbar.ax.tick_params(labelsize=tick_font_size)
+            colourbar.ax.yaxis.get_offset_text().set_fontsize(tick_font_size)
+
         extension = os.path.splitext(filepath)[1].lower()
         rasterize_points = extension == ".svg"
         point_size = float(export_options.get("point_size", 2.0))
@@ -1461,7 +1641,6 @@ class MainWindow(QMainWindow):
 
         def full_resolution_error_distances(dataset, source_points, error_map):
             """Recompute an active error map for all export points."""
-            from scipy.spatial import cKDTree
 
             reference_filepath = error_map.get("reference_filepath")
             reference = next(
@@ -1482,26 +1661,18 @@ class MainWindow(QMainWindow):
             reference_points = reference_points_cache[cache_key]
             if not len(reference_points):
                 raise RuntimeError(f"The reference cloud for '{dataset['name']}' has no points after filtering.")
-            source_footprint, reference_footprint, _coverage, _details = _comparison_footprint_masks(
-                source_points, reference_points,
-                edge_cutoff=float(error_map.get("edge_margin", error_map.get("cutoff", 1.0)))
+            _, pointwise = calculate_cloud_error(
+                pd.DataFrame(source_points, columns=["X", "Y", "Z"]),
+                pd.DataFrame(reference_points, columns=["X", "Y", "Z"]),
+                max_distance=float(error_map.get("edge_margin", error_map.get("cutoff", 1.0))),
+                include_pointwise=True, progress_callback=progress_callback,
+                is_cancelled_callback=is_cancelled_callback,
+                error_method=error_map.get("error_method", "unsigned"),
+                normal_radius=float(error_map.get("normal_radius", 0.0)),
+                normal_neighbours=int(error_map.get("normal_neighbours", 30)),
+                normal_orientation=error_map.get("normal_orientation", "+Z"),
             )
-            comparison_reference_points = reference_points[reference_footprint]
-            if not len(comparison_reference_points):
-                return np.full(len(source_points), np.inf, dtype=np.float64)
-            tree = cKDTree(comparison_reference_points)
-            distances = np.full(len(source_points), np.inf, dtype=np.float64)
-            footprint_indices = np.flatnonzero(source_footprint)
-            chunk_size = 100_000
-            for start in range(0, len(footprint_indices), chunk_size):
-                if is_cancelled_callback and is_cancelled_callback():
-                    raise RuntimeError("Cancelled by User")
-                stop = min(start + chunk_size, len(footprint_indices))
-                indices = footprint_indices[start:stop]
-                distances[indices], _ = tree.query(
-                    source_points[indices], k=1, workers=-1
-                )
-            return distances
+            return pointwise["distances"]
 
         for layer_index, dataset in enumerate(visible):
             _check = is_cancelled_callback
@@ -1541,32 +1712,17 @@ class MainWindow(QMainWindow):
                 in_overlap = np.isfinite(distances)
                 unit = error_map.get("unit", "mm")
                 if np.any(in_overlap):
-                    colour_mode = error_map.get("colour_mode", "closest_distance")
-                    mean = error_map.get("mean")
-                    if colour_mode == "difference_from_mean" and mean is not None and np.isfinite(mean):
-                        values = distances[in_overlap] - float(mean)
-                        limit = max(float(np.percentile(np.abs(values), 95)), np.finfo(float).eps)
-                        colour_kwargs = {"cmap": export_options.get("heatmap_colormap", "coolwarm"), "vmin": -limit, "vmax": limit}
-                        colourbar_label = f"Closest-reference distance minus mean\n({unit})"
-                    else:
-                        values = distances[in_overlap]
-                        manual_max = float(error_map.get("heatmap_max", 0.0))
-                        limit = max(manual_max or float(error_map.get("p95") or np.percentile(values, 95)),
-                                    np.finfo(float).eps)
-                        colour_kwargs = {"cmap": export_options.get("heatmap_colormap", "turbo"), "vmin": 0.0, "vmax": limit}
-                        limit_label = "manual max" if manual_max else "P95"
-                        colourbar_label = f"Unsigned distance to reference\n({unit}; colours capped at {limit_label})"
+                    values, colour_kwargs, colourbar_label, _ = error_map_colours(
+                        distances[in_overlap], error_map, export_options.get("heatmap_colormap", "auto")
+                    )
                     scatter = axes.scatter(
                         points[in_overlap, 0], points[in_overlap, 1], points[in_overlap, 2], c=values,
                         marker=".", s=point_size,
                         label=display_label,
-                        zorder=zorder, rasterized=rasterize_points, axlim_clip=True, **colour_kwargs,
+                        zorder=zorder, rasterized=rasterize_points, axlim_clip=True,
+                        depthshade=False, **colour_kwargs,
                     )
-                    figure.colorbar(
-                        scatter, ax=axes, label=export_options.get("colourbar_label") or colourbar_label, pad=0.1,
-                        shrink=float(export_options.get("colourbar_height", 1.0)),
-                        format=colourbar_format,
-                    )
+                    add_colourbar(scatter, colourbar_label)
                 if np.any(~in_overlap):
                     axes.scatter(
                         points[~in_overlap, 0], points[~in_overlap, 1], points[~in_overlap, 2], c="0.55",
@@ -1590,21 +1746,18 @@ class MainWindow(QMainWindow):
 
         if height_mappable is not None:
             unit = visible[0]["settings"].get("distance_unit", "mm")
-            figure.colorbar(
-                height_mappable, ax=axes,
-                label=export_options.get("colourbar_label") or f"Height / Z coordinate\n({unit})", pad=0.1,
-                shrink=float(export_options.get("colourbar_height", 1.0)),
-                format=colourbar_format,
-            )
+            add_colourbar(height_mappable, f"Height / Z coordinate\n({unit})")
 
-        axes.set_xlabel(export_options.get("x_label", "X"))
-        axes.set_ylabel(export_options.get("y_label", "Y"))
-        # Matplotlib's 3-D z-axis label can be clipped when an export also
-        # has a colorbar.  Draw the export label at figure level so it remains
-        # visible for every camera angle and bounding-box setting.
-        z_label = export_options.get("z_label", "Z")
-        axes.set_zlabel("")
-        figure.text(0.105, 0.5, z_label, rotation=90, va="center", ha="center")
+        # Make room between labels and tick numbers when export fonts grow.
+        label_padding = (4.0 + 0.75 * max(0.0, axis_label_font_size - 10.0)
+                         + 1.5 * max(0.0, axis_tick_font_size - 10.0))
+        axes.set_xlabel(export_options.get("x_label", "X"), fontsize=axis_label_font_size,
+                        labelpad=label_padding)
+        axes.set_ylabel(export_options.get("y_label", "Y"), fontsize=axis_label_font_size,
+                        labelpad=label_padding)
+        axes.tick_params(axis="both", labelsize=axis_tick_font_size)
+        for axis in (axes.xaxis, axes.yaxis, axes.zaxis):
+            axis.get_offset_text().set_fontsize(axis_tick_font_size)
         try:
             axes.set_box_aspect(view_state["box_aspect"])
         except (AttributeError, KeyError):
@@ -1675,6 +1828,11 @@ class MainWindow(QMainWindow):
             )
         if progress_callback:
             progress_callback("Writing full-resolution plot export...")
+        layout_export_z_axis(figure, axes, export_options.get("z_label", "Z"), axis_label_font_size,
+                             spacing=float(export_options.get("z_axis_label_spacing", 0.0)),
+                             tick_count=int(export_options.get("z_axis_ticks", export_options.get("z_axis_max_ticks", 0))),
+                             tick_interval=float(export_options.get("z_axis_tick_interval", 0.0)),
+                             tick_label_gap=float(export_options.get("z_axis_tick_label_gap", 0.0)))
         figure.savefig(filepath, format=extension.lstrip("."), bbox_inches="tight")
         self._trim_raster_export_whitespace(filepath)
         return {"error_maps_rendered": error_maps_rendered}

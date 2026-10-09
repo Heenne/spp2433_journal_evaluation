@@ -4,9 +4,16 @@ from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.cm as cm
+from src.utils.error_mapping import error_map_colours
 
 class PlotCanvas(FigureCanvas):
+    MAX_PREVIEW_POINTS = 100_000
+
     def __init__(self, parent=None, width=5, height=4, dpi=100):
+        self._rendering_suspended = False
+        self._draw_deferred = False
+        self._deferred_datasets = None
+        self.preview_point_counts = []
         self.fig = Figure(figsize=(width, height), dpi=dpi, constrained_layout=True)
         self.axes = self.fig.add_subplot(111, projection='3d')
         # Matplotlib's 3-D axes normally reorder entire scatter collections by
@@ -17,6 +24,7 @@ class PlotCanvas(FigureCanvas):
         super(PlotCanvas, self).__init__(self.fig)
         self.setParent(parent)
         self.colorbars = []
+        self._preview_notice = self.fig.text(0.01, 0.01, "", fontsize=8, color="0.35")
         self._has_plotted_data = False
         self._visible_dataset_ids = ()
         self._fitted_limits = None
@@ -100,6 +108,10 @@ class PlotCanvas(FigureCanvas):
 
         
     def plot_datasets(self, datasets: list):
+        if self._rendering_suspended:
+            self._deferred_datasets = datasets
+            self._draw_deferred = True
+            return
         # ``cla`` resets the 3-D camera. Preserve it after the first plot so a
         # manual transform updates the geometry without losing the user's
         # zoomed/panned inspection view.
@@ -149,6 +161,9 @@ class PlotCanvas(FigureCanvas):
         self.axes.cla() # Clear axes after restoring the original layout
                 
         visible_datasets = [d for d in datasets if d.get("visible", False) and "df_filtered" in d and not d["df_filtered"].empty]
+        self.preview_point_counts = []
+        self._preview_notice.set_text("")
+        per_cloud_limit = max(1, self.MAX_PREVIEW_POINTS // max(1, len(visible_datasets)))
         
         if not visible_datasets:
             self._visible_dataset_ids = ()
@@ -171,9 +186,9 @@ class PlotCanvas(FigureCanvas):
             # last/highest, then each following one lies underneath it.
             zorder = len(visible_datasets) - layer_index + 1
             
-            x = df['X'].copy()
-            y = df['Y'].copy()
-            z = df['Z'].copy()
+            x = df['X'].to_numpy(dtype=float, copy=False)
+            y = df['Y'].to_numpy(dtype=float, copy=False)
+            z = df['Z'].to_numpy(dtype=float, copy=False)
 
             error_map = d.get("error_visualization") if d.get("show_error_visualization", False) else None
             if error_map is not None:
@@ -185,35 +200,36 @@ class PlotCanvas(FigureCanvas):
                 else:
                     error_map = None
             
-            x_min, x_max = min(x_min, x.min()), max(x_max, x.max())
-            y_min, y_max = min(y_min, y.min()), max(y_max, y.max())
-            z_min, z_max = min(z_min, z.min()), max(z_max, z.max())
+            x_min, x_max = min(x_min, np.nanmin(x)), max(x_max, np.nanmax(x))
+            y_min, y_max = min(y_min, np.nanmin(y)), max(y_max, np.nanmax(y))
+            z_min, z_max = min(z_min, np.nanmin(z)), max(z_max, np.nanmax(z))
+            full_count = len(x)
+            indices = np.linspace(0, full_count - 1, per_cloud_limit, dtype=np.int64) if full_count > per_cloud_limit else None
+            normalization_distances = None
+            if error_map is not None and indices is not None:
+                full_overlap = np.isfinite(distances)
+                if np.any(full_overlap):
+                    normalization_distances = distances[full_overlap]
+                    indices[0] = np.argmax(full_overlap)
+                if len(indices) > 1 and not np.all(full_overlap):
+                    indices[1] = np.argmin(full_overlap)
+            if indices is not None:
+                x, y, z = x[indices], y[indices], z[indices]
+                if error_map is not None:
+                    distances = distances[indices]
+            self.preview_point_counts.append((full_count, len(x)))
             
             if error_map is not None:
                 distance_unit = error_map.get("unit", "mm")
                 in_overlap = np.isfinite(distances)
                 point_size = 8
                 if np.any(in_overlap):
-                    colour_mode = error_map.get("colour_mode", "closest_distance")
-                    mean = error_map.get("mean")
-                    if colour_mode == "difference_from_mean" and mean is not None and np.isfinite(mean):
-                        colour_values = distances[in_overlap] - float(mean)
-                        colour_limit = max(float(np.percentile(np.abs(colour_values), 95)), np.finfo(float).eps)
-                        colour_kwargs = {"cmap": "coolwarm", "vmin": -colour_limit, "vmax": colour_limit}
-                        colourbar_label = f"Closest-reference distance minus mean ({distance_unit})"
-                        mean_marker = 0.0
-                    else:
-                        colour_values = distances[in_overlap]
-                        manual_max = float(error_map.get("heatmap_max", 0.0))
-                        colour_limit = max(manual_max or float(error_map.get("p95") or np.percentile(colour_values, 95)),
-                                           np.finfo(float).eps)
-                        colour_kwargs = {"cmap": "turbo", "vmin": 0.0, "vmax": colour_limit}
-                        limit_label = "manual max" if manual_max else "P95"
-                        colourbar_label = f"Unsigned distance to reference ({distance_unit}; colours capped at {limit_label})"
-                        mean_marker = mean
+                    colour_values, colour_kwargs, colourbar_label, mean_marker = error_map_colours(
+                        distances[in_overlap], error_map, normalization_distances=normalization_distances
+                    )
                     scatter = self.axes.scatter(
                         x[in_overlap], y[in_overlap], z[in_overlap], c=colour_values,
-                        marker='.', s=point_size, zorder=zorder, **colour_kwargs,
+                        marker='.', s=point_size, zorder=zorder, depthshade=False, **colour_kwargs,
                         label=f"{name} error", axlim_clip=True,
                     )
                     cb = self.fig.colorbar(
@@ -243,9 +259,13 @@ class PlotCanvas(FigureCanvas):
             base_color = st.get("base_color", "b")
             
             if color_col and color_col in df.columns:
-                c = df[color_col]
+                c = df[color_col].to_numpy()
+                colour_min, colour_max = df[color_col].min(), df[color_col].max()
+                if indices is not None:
+                    c = c[indices]
                 scatter = self.axes.scatter(
-                    x, y, z, c=c, cmap=cm.viridis, marker='.', s=10, label=name, zorder=zorder,
+                    x, y, z, c=c, cmap=cm.viridis, vmin=colour_min, vmax=colour_max,
+                    marker='.', s=10, label=name, zorder=zorder,
                     axlim_clip=True,
                 )
                 if not colorbar_added:
@@ -261,7 +281,13 @@ class PlotCanvas(FigureCanvas):
         self.axes.set_ylabel('Y')
         self.axes.set_zlabel('Z')
         if error_map_shown:
-            self.axes.set_title("Pointwise unsigned distance to reference")
+            self.axes.set_title("Pointwise deviation from reference")
+        preview_summary = self.preview_summary()
+        self._preview_notice.set_text(preview_summary)
+        if preview_summary:
+            # Preserve the full cloud extent, even when an isolated extreme
+            # point is absent from the interactive display sample.
+            self.axes.auto_scale_xyz([x_min, x_max], [y_min, y_max], [z_min, z_max])
         
         if self.axes.collections:
             handles, labels = self.axes.get_legend_handles_labels()
@@ -310,6 +336,49 @@ class PlotCanvas(FigureCanvas):
             
         self.draw_idle()
 
+    def preview_summary(self):
+        total = sum(full for full, shown in self.preview_point_counts)
+        shown = sum(shown for full, shown in self.preview_point_counts)
+        return f"Interactive preview: {shown:,} of {total:,} points; statistics unchanged." if shown < total else ""
+
     def export_plot(self, filepath: str):
         """Exports the current plot to the given filepath (png, jpg, svg)."""
         self.fig.savefig(filepath, format=filepath.split('.')[-1], bbox_inches='tight')
+
+    def finish_pending_draw(self):
+        """Complete queued rendering before another window needs its first paint."""
+        # Matplotlib's Qt backend consumes its pending flag here, so the
+        # queued timer cannot start a second costly draw after a dialog opens.
+        self._draw_idle()
+
+    def draw(self):
+        if self._rendering_suspended:
+            self._draw_deferred = True
+            return
+        super().draw()
+
+    def draw_idle(self):
+        if self._rendering_suspended:
+            self._draw_deferred = True
+            return
+        super().draw_idle()
+
+    def pause_rendering(self):
+        """Keep plot redraws from blocking an open results window."""
+        if self._rendering_suspended:
+            return
+        self._rendering_suspended = True
+        self._updates_before_pause = self.updatesEnabled()
+        self.setUpdatesEnabled(False)
+
+    def resume_rendering(self):
+        if not self._rendering_suspended:
+            return
+        self._rendering_suspended = False
+        datasets, self._deferred_datasets = self._deferred_datasets, None
+        redraw, self._draw_deferred = self._draw_deferred, False
+        if datasets is not None:
+            self.plot_datasets(datasets)
+        elif redraw:
+            self.draw_idle()
+        self.setUpdatesEnabled(self._updates_before_pause)

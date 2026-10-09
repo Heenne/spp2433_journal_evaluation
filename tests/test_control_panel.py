@@ -189,6 +189,39 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         self.assertFalse(panel.export_heightmap_check.isChecked())
         panel.deleteLater()
 
+    def test_z_axis_export_spacing_and_tick_count_are_saved_and_restored(self):
+        import json
+        panel = ControlPanel()
+        restored = ControlPanel()
+        try:
+            panel.export_z_label_spacing_spin.setValue(18.0)
+            panel.export_z_tick_label_gap_spin.setValue(30.0)
+            panel.export_z_ticks_spin.setValue(5)
+            panel.export_z_tick_interval_spin.setValue(10)
+            options = json.loads(json.dumps(panel.get_export_options()))
+            self.assertEqual(options["z_axis_ticks"], 5)
+            self.assertEqual(options["z_axis_tick_interval"], 10)
+            self.assertEqual(options["z_axis_tick_label_gap"], 30)
+            restored.apply_export_options(options)
+            self.assertEqual(restored.export_z_label_spacing_spin.value(), 18.0)
+            self.assertEqual(restored.export_z_tick_label_gap_spin.value(), 30.0)
+            self.assertEqual(restored.export_z_ticks_spin.value(), 5)
+            self.assertEqual(restored.export_z_tick_interval_spin.value(), 10)
+            self.assertFalse(restored.export_z_ticks_spin.isEnabled())
+            restored.apply_export_options({"z_axis_max_ticks": 4})
+            self.assertEqual(restored.export_z_ticks_spin.value(), 4)
+            self.assertEqual(restored.export_z_tick_interval_spin.value(), 0)
+            self.assertEqual(restored.export_z_tick_label_gap_spin.value(), 0)
+            self.assertTrue(restored.export_z_ticks_spin.isEnabled())
+            restored.apply_export_options({"z_axis_ticks": 7, "z_axis_max_ticks": 4})
+            self.assertEqual(restored.export_z_ticks_spin.value(), 7)
+            restored.apply_export_options({})
+            self.assertEqual(restored.export_z_label_spacing_spin.value(), 0)
+            self.assertEqual(restored.export_z_ticks_spin.value(), 0)
+        finally:
+            panel.deleteLater()
+            restored.deleteLater()
+
     def test_plain_export_legend_labels_follow_visible_cloud_order(self):
         panel = ControlPanel()
         panel.add_dataset_to_list("reference")

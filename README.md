@@ -4,6 +4,7 @@ A fast, local Python desktop application built with **PyQt6** and **matplotlib**
 
 ## Features
 
+- **Application Icon**: A blue-white-red point-cloud icon appears in the title bar and running application's Windows taskbar button. Restart the application after updating. Assets are in `src/assets/app_icon.{svg,png,ico}`; rebuild them with `pixi run python tools/generate_app_icon.py`. The ICO includes sizes from 16 to 256 pixels. Windows startup sets the dedicated identity `SPP2433.PointCloudEvaluation` before creating the UI.
 - **Robust CSV Parsing**: Dynamically detects `X`, `Y`, and `Z` coordinates regardless of capitalization, and automatically ignores comment blocks like `//` in the headers. Retains extra columns (Intensity, Return Number, etc.) for visualization.
 - **Smart Filtering & Downsampling**: Includes intuitive sliders to decimate the point cloud (e.g., keep 1 in every 10 points) or take a random percentage sample to keep the application responsive with massive datasets.
 - **Caching Mechanism**: Save your filtered datasets locally. The app will automatically detect optimized datasets the next time you load the original file, saving significant loading time.
@@ -18,6 +19,8 @@ A fast, local Python desktop application built with **PyQt6** and **matplotlib**
 - **Surface-Error Report**: Calculate source-to-reference nearest-surface distances for only the overlapping area, with coverage, P5, median, mean, RMSE, P95, and maximum deviation. Save the project to keep the numeric report across sessions.
 - **Pointwise Error Map**: After a surface-error calculation, colour every analysed project-cloud point from low to high nearest-surface error. The colour bar marks the mean; points outside the reference footprint or its edge band are grey and points above the mean can optionally be overlaid in red. Set **Heatmap maximum** under **Surface Error** before calculation to a fixed value, or use automatic P95 scaling. You can also adjust it afterward without recalculating. Export the current view as a report figure.
 - **High-Quality Export**: Export your generated plots to static formats (PNG/JPEG) or vector graphics (SVG) for reports and presentations.
+- **Export Font Sizes**: Under **Export Appearance**, set separate sizes in points for axis labels, axis numbers, colour-bar labels, and colour-bar numbers. These apply to previews and both display-resolution and full-resolution exports, and are saved with export settings. Older settings files default to 10 pt.
+- **Z-axis Export Spacing**: The Z title follows the rendered tick-label position. **Z-axis title gap** sets the space between the title and tick numbers in points. **Z-axis tick label gap** sets the minimum empty space between adjacent numbers in points, expanding the displayed Z-axis height while retaining coordinates, limits, and tick values. Its **Default** leaves the axis proportions unchanged. **Z-axis tick interval** sets a step in axis units: `10` places ticks at multiples of 10 within the current limits, including negative values and zero. A positive interval overrides **Number of Z-axis ticks**, which remains available for an exact count. With no interval or count, **Auto** chooses ticks and reduces overlap. These settings are saved with export settings; older tick settings remain compatible. Label layout is measured with scatter points hidden, so dense clouds are rendered only during the actual export.
 
 ## Prerequisites
 
@@ -61,6 +64,8 @@ The default registration limit is 30,000 adaptive voxel points per cloud. Surfac
 
 After calculating surface error, save the project to retain the numeric report and your manual heatmap maximum. Reopening the project restores the report when both input files and their cloud settings are unchanged. The pointwise colour map is held in memory and must be recalculated after reopening if you want to display or export it again.
 
+Surface-error settings are saved per source cloud independently of the numeric report: reference selection, reference edge margin, maximum source points, colouring mode, heatmap maximum, and the show-map/highlight options. They survive reopening, edits that invalidate a report, and changes made before the first calculation. Reopening also restores the selected surface-error source.
+
 Fine alignment estimates a rigid pose (rotation and translation), not a scale. The clouds must therefore be brought into compatible units with **Uniform scale** first. Smooth, repetitive blade regions and very small overlaps are inherently ambiguous, so overlap coverage and the visual overlay remain important validation checks. **Invert X/Y/Z** is applied before plotting, both alignment methods, surface-error calculation, and saved transformed data. If you have inverted the reference Z axis to put it in the correct visual direction, both aligners use that inverted reference rather than the original raw Z values.
 
 ## Previous Global Auto Alignment (PCA / FPFH)
@@ -89,9 +94,31 @@ The displayed **source overlap** is the fraction of the selected project cloud w
 
 ## Surface-error calculation
 
-After an accepted pose is saved, **Calculate Surface Error** computes the unsigned Euclidean nearest-neighbour distance for every analysed selected-cloud point to the full reference cloud:
+After an accepted pose is saved, **Calculate Surface Error** offers two **Error method** choices. The existing unsigned mode computes the Euclidean nearest-neighbour distance for every analysed selected-cloud point:
 
 `d_i = min_{q in reference} ||p_i - q||_2`
+
+**Signed local normal / plane distance** instead fits a local PCA plane around each reference point using the full quality-filtered reference cloud. The plane passes through the neighbourhood centroid `c`; its unit normal `n` is the covariance eigenvector with the smallest eigenvalue. Each system point is associated with its nearest eligible reference point and evaluated as `e = (p - c) dot n`. This is a signed local plane approximation, not a signed nearest-point magnitude or exact distance to a reconstructed curved surface. It follows local surface slope but can be biased by curvature when the neighbourhood is too large.
+
+Set **Normal radius** in the configured distance unit (zero selects three times the median positive nearest-neighbour reference spacing), **Maximum normal neighbours** (default 30), and **Normal orientation** (+/- X, Y, or Z in the transformed reference coordinates). Normals point towards the selected direction, which defines positive error; it does not automatically identify the specimen exterior. Choose an appropriate direction for each surface side. Neighbourhoods with fewer than three points, effectively collinear points (second/largest covariance eigenvalue ratio <= 1e-8), insufficient planarity (smallest/second eigenvalue ratio > 0.25), or near-perpendicular orientation (`abs(n dot direction) <= 1e-6`) are excluded and shown grey. Their source-point count is reported separately. The projected coverage metrics are independent of these normal exclusions.
+
+**Heatmap scale** supports automatic bounds, a symmetric `[-maximum, +maximum]` range, or a custom **Heatmap minimum / maximum**. Automatic signed maps use the 95th percentile of absolute deviations symmetrically; a positive maximum overrides that magnitude. In symmetric mode zero also selects automatic magnitude. In custom mode both limits are literal and minimum must be smaller than maximum. Clipping changes colours only, never the statistics. Signed maps default to blue for negative values, white at zero, and red for positive values. Under **Export Appearance -> Heatmap colours**, select **Blue / white at zero / red** to use this palette explicitly, including with asymmetric limits; **Automatic (by error method)** chooses it for signed maps and `turbo` for unsigned maps. Preview, current-display export, and full-resolution export share the same error method and normalization. Existing saved export settings that explicitly select `turbo` retain that selection.
+
+All normal and scale settings are saved per source cloud in the project. Changing the error method or normal parameters requires **Calculate Surface Error** again; valid colour-scale changes update an existing map immediately. The report includes the selected metric, P5/P95, mean, RMSE, signed minimum/maximum, and sample standard deviation (`ddof=1`, unavailable for fewer than two valid points). Normal parameters and orientation remain attached to the calculated map so export cannot silently switch methods when controls are edited.
+
+#### Journal statistics and result overview
+
+In **Fine Align & Error → Surface Error**, enter each source system's **Axial measurement range** from Table 3 in the same unit as the errors. Enter the full span: a range from −100 to +100 mm means **200 mm**. This input is saved per source cloud; changing it updates the normalized statistic without recalculating point deviations.
+
+The compact result table and **View Surface Error Results…** dialog show the system-point fraction, reference-area coverage, **[P5; P95]** (central 90% empirical interval), **sample standard deviation**, and **normalized standard deviation (%) = 100 × SD / axial measurement span**. These are computed from the valid deviations of the selected error method, including negative deviations in signed mode. The dialog provides an overview across loaded clouds, detailed results for the selected row, an additional **[P2.5; P97.5]** interval, and **Copy table (TSV)** for transfer to a spreadsheet. Median remains in saved reports for compatibility but is no longer a headline statistic.
+
+The status below the calculation controls indicates missing results, available results, missing axial range, or calculation settings changed since the last report. Changes to the error method, reference, edge margin, analysis-point cap or signed-normal parameters require recalculation. Missing statistics are displayed as **—**, including SD for fewer than two valid points; a genuinely zero SD is displayed as zero. Older reports with missing statistics need recalculation. Display clipping does not change the statistics.
+
+The report is prepared before its window opens. Opening it returns immediately from the comparison worker's completion callback; the main window remains modal while the report is visible. Plot redraws and incoming plot refreshes are deferred until the report closes, so resizing/layout events cannot make the results window wait for a dense point-cloud redraw.
+
+**Error statistics ready** means the numerical calculation has finished; **Preparing interactive point-cloud preview** identifies the subsequent rendering phase. The progress indicator is cleared only when both are ready. To keep large scans responsive, the interactive canvas displays at most **100,000 points across visible clouds**, sampled deterministically. A note in the plot identifies this reduction. Full point arrays, error statistics, automatic colour limits and axis extent are retained. The **full-resolution export** uses the full quality-filtered clouds; a direct export of the interactive canvas captures its reduced preview.
+
+The normalized SD is the percentage requested for the reviewer's “dynamic range” column; **Normalized SD / axial range (%)** is a precise column label. The sample SD is calculated about the arithmetic mean with denominator N−1. The percentile intervals describe the empirical distribution of point deviations, not a complete GUM measurement-uncertainty evaluation.
 
 The reference is indexed in a KD-tree. The selected project cloud is queried in chunks of 100,000 points. By default, all selected-cloud points are analysed. You can set **Maximum source points** to a limit to use a reproducible random sample for faster analysis. Display-only decimation is not used for the calculation.
 
@@ -104,7 +131,7 @@ The **Reference edge margin** excludes a narrow outer band of the reference foot
 - 95th percentile (P95); and
 - maximum distance.
 
-All values are displayed in the configured distance unit (default: millimetres) after scaling. The present calculation is **unsigned nearest-surface Euclidean distance**. It does not determine whether a point is above/below the reference surface, does not measure distance along a surface normal, and does not itself provide uncertainty bounds. Therefore it is appropriate to describe it exactly as an unsigned closest-surface deviation, not as signed thickness loss, signed blade deflection, or absolute ground-truth accuracy. For a future signed, normal-direction change analysis with local roughness/registration uncertainty, M3C2 is a relevant established approach; see [Lague, Brodu & Leroux (2013)](https://doi.org/10.1016/j.isprsjprs.2013.04.009).
+All values are displayed in the configured distance unit (default: millimetres) after scaling. Unsigned mode reports nonnegative nearest-point magnitudes; signed mode reports local normal deviations. Neither method alone supplies measurement uncertainty bounds or establishes material loss, deflection, or independent ground-truth accuracy. For normal-direction change analysis with local roughness/registration uncertainty, M3C2 is an established alternative; see [Lague, Brodu & Leroux (2013)](https://doi.org/10.1016/j.isprsjprs.2013.04.009). The existing unsigned-map description above applies to unsigned mode; signed maps use the selected signed deviations and the bounds described above. **Difference from mean deviation** subtracts the mean for colours only: white then denotes the mean deviation, not the reference surface.
 
 ### Exact X-Y coverage calculation
 
@@ -148,11 +175,11 @@ Report the following once in the Methods section and, where it varies, per datas
 
 For every project cloud, a compact results table should include at least:
 
-| Cloud | Selected initialisation | Source overlap | Registration trimmed RMSE | Analysed / evaluated points | System points within reference area [%] | Reference area covered [%] | P5 | Median | Mean | RMSE | P95 | Maximum |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Project A | e.g. global FPFH/RANSAC | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... |
+| Cloud | Error method | Analysed / evaluated points | System points within reference area [%] | Reference area covered [%] | [P5; P95] | Sample SD | Normalized SD / axial range [%] |
+| --- | --- | ---: | ---: | ---: | --- | ---: | ---: |
+| Project A | e.g. signed local normal | ... | ... | ... | ... | ... | ... |
 
-Use one unit consistently in the table (for example, mm). The **median** and **P95** are usually the most informative headline values for a heavy-tailed error distribution; the **RMSE** shows the effect of larger deviations. Give the **mean** as well if desired, but do not report only a mean. The maximum is useful as a diagnostic, but is highly sensitive to isolated noise, edge effects, and a few bad correspondences.
+Use one distance unit consistently in the table (for example, mm). Report the empirical **[P5; P95]** interval alongside **sample SD**; the percentile interval describes the central 90% of the deviation distribution, while SD also reflects the tails. Normalize SD by the system's axial measurement span for the requested percentage column. The maximum and RMSE remain useful diagnostics of larger deviations.
 
 Keep two quantities distinct in the text and table:
 

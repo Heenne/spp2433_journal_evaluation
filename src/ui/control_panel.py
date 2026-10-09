@@ -28,6 +28,8 @@ class ControlPanel(QWidget):
     error_map_display_changed = pyqtSignal(bool)
     error_map_colour_mode_changed = pyqtSignal(str)
     error_map_max_changed = pyqtSignal(float)
+    surface_error_settings_changed = pyqtSignal()
+    comparison_report_requested = pyqtSignal()
     camera_view_requested = pyqtSignal(str)
     camera_rotate_requested = pyqtSignal(float)
     camera_angles_requested = pyqtSignal(float, float, float)
@@ -109,11 +111,11 @@ class ControlPanel(QWidget):
         self.show_error_map_check.toggled.connect(self.error_map_display_changed.emit)
         analysis_display_layout.addWidget(self.show_error_map_check)
         self.error_map_colour_mode_combo = QComboBox()
-        self.error_map_colour_mode_combo.addItem("Closest-reference distance", "closest_distance")
-        self.error_map_colour_mode_combo.addItem("Difference from mean distance", "difference_from_mean")
+        self.error_map_colour_mode_combo.addItem("Calculated deviation", "closest_distance")
+        self.error_map_colour_mode_combo.addItem("Difference from mean deviation", "difference_from_mean")
         self.error_map_colour_mode_combo.setToolTip(
-            "Closest-reference distance colours each point by its actual nearest-reference error. "
-            "Difference from mean distance centres a blue-white-red scale on the calculated mean error."
+            "Calculated deviation uses the latest error method. Difference from mean deviation "
+            "subtracts its mean for display only; zero then means the mean, not the reference surface."
         )
         self.error_map_colour_mode_combo.currentIndexChanged.connect(
             lambda _: self.error_map_colour_mode_changed.emit(self.error_map_colour_mode_combo.currentData())
@@ -552,20 +554,54 @@ class ControlPanel(QWidget):
         self.comparison_points_spin.setToolTip(
             "Maximum source points used for the report. A reproducible random sample is used above the limit; set to 0 for all points."
         )
+        self.comparison_method_combo = QComboBox()
+        self.comparison_method_combo.addItem("Unsigned nearest-reference distance (existing)", "unsigned")
+        self.comparison_method_combo.addItem("Signed local normal / plane distance", "signed_normal")
+        self.comparison_normal_radius_spin = QDoubleSpinBox()
+        self.comparison_normal_radius_spin.setRange(0.0, 1_000_000.0)
+        self.comparison_normal_radius_spin.setDecimals(6)
+        self.comparison_normal_radius_spin.setSpecialValueText("Auto (3 x reference spacing)")
+        self.comparison_normal_radius_spin.setToolTip("PCA neighbourhood radius in the cloud's distance unit; larger radii smooth curvature.")
+        self.comparison_normal_neighbours_spin = QSpinBox()
+        self.comparison_normal_neighbours_spin.setRange(3, 500)
+        self.comparison_normal_neighbours_spin.setValue(30)
+        self.comparison_normal_orientation_combo = QComboBox()
+        self.comparison_normal_orientation_combo.addItems(["+Z", "-Z", "+X", "-X", "+Y", "-Y"])
+        self.comparison_normal_orientation_combo.setToolTip(
+            "Orient local normals towards this reference-coordinate direction. Positive error follows the normal. "
+            "This does not automatically identify the specimen exterior; select a direction appropriate for this surface side."
+        )
+        self.comparison_axial_range_spin = QDoubleSpinBox()
+        self.comparison_axial_range_spin.setRange(0.0, 1_000_000_000.0)
+        self.comparison_axial_range_spin.setDecimals(6)
+        self.comparison_axial_range_spin.setSpecialValueText("Not set")
+        self.comparison_axial_range_spin.setToolTip(
+            "Full axial measurement span from Table 3, in the same distance unit as the errors. "
+            "Normalized SD [%] = 100 x standard deviation / axial range. "
+            "For -100 to +100 mm enter 200. Zero leaves the normalized value unavailable."
+        )
+        self.comparison_scale_mode_combo = QComboBox()
+        self.comparison_scale_mode_combo.addItem("Automatic (signed: symmetric P95 magnitude)", "auto")
+        self.comparison_scale_mode_combo.addItem("Symmetric +/- maximum", "symmetric")
+        self.comparison_scale_mode_combo.addItem("Custom minimum / maximum", "manual")
+        self.error_map_min_spin = QDoubleSpinBox()
+        self.error_map_min_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self.error_map_min_spin.setDecimals(6)
+        self.error_map_min_spin.setValue(-1.0)
         self.comparison_colour_mode_combo = QComboBox()
-        self.comparison_colour_mode_combo.addItem("Closest-reference distance", "closest_distance")
-        self.comparison_colour_mode_combo.addItem("Difference from mean distance", "difference_from_mean")
+        self.comparison_colour_mode_combo.addItem("Calculated deviation", "closest_distance")
+        self.comparison_colour_mode_combo.addItem("Difference from mean deviation", "difference_from_mean")
         self.comparison_colour_mode_combo.setToolTip(
-            "Choose how the calculated nearest-reference distances are coloured. "
-            "The statistics always use the actual nearest-reference distances."
+            "Show calculated deviations directly or subtract their mean for display only. "
+            "The statistics always use the selected error method without mean subtraction."
         )
         self.error_map_max_spin = QDoubleSpinBox()
         self.error_map_max_spin.setRange(0.0, 1_000_000.0)
         self.error_map_max_spin.setDecimals(6)
         self.error_map_max_spin.setSpecialValueText("Auto (P95)")
         self.error_map_max_spin.setToolTip(
-            "Upper colour-scale limit for closest-reference distance. Values above it remain in the "
-            "statistics and use the highest colour. Zero uses P95 automatically."
+            "Upper limit for a custom range, or positive magnitude for a symmetric range. "
+            "Zero means automatic only outside custom mode. Colour clipping does not alter statistics."
         )
         self.error_map_max_spin.valueChanged.connect(self.error_map_max_changed.emit)
         self.btn_calculate_error = QPushButton("Calculate Surface Error")
@@ -581,21 +617,65 @@ class ControlPanel(QWidget):
             "Keeps the continuous distance colours below the mean and overlays overlap points above the "
             "reported mean distance in red."
         )
+        for signal in (
+            self.comparison_target_combo.currentIndexChanged,
+            self.comparison_cutoff_spin.valueChanged,
+            self.comparison_points_spin.valueChanged,
+            self.comparison_colour_mode_combo.currentIndexChanged,
+            self.comparison_show_map_check.toggled,
+            self.comparison_highlight_mean_check.toggled,
+            self.comparison_method_combo.currentIndexChanged,
+            self.comparison_normal_radius_spin.valueChanged,
+            self.comparison_normal_neighbours_spin.valueChanged,
+            self.comparison_normal_orientation_combo.currentIndexChanged,
+            self.comparison_scale_mode_combo.currentIndexChanged,
+            self.error_map_min_spin.valueChanged,
+            self.comparison_axial_range_spin.valueChanged,
+        ):
+            signal.connect(lambda *_: self.surface_error_settings_changed.emit())
         self.comparison_summary = QLabel("No comparison calculated yet.")
         self.comparison_summary.setWordWrap(True)
         self.comparison_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.comparison_status = QLabel("No results — calculate surface error")
+        self.comparison_status.setWordWrap(True)
+        self.comparison_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.btn_comparison_report = QPushButton("View Surface Error Results…")
+        self.btn_comparison_report.setEnabled(False)
+        self.btn_comparison_report.clicked.connect(self.comparison_report_requested.emit)
         comparison_layout.addRow("Source:", self.comparison_source_combo)
         comparison_layout.addRow("Reference:", self.comparison_target_combo)
         comparison_layout.addRow("Reference edge margin:", self.comparison_cutoff_spin)
         comparison_layout.addRow("Maximum source points:", self.comparison_points_spin)
+        comparison_layout.addRow("Error method:", self.comparison_method_combo)
+        comparison_layout.addRow("Normal radius:", self.comparison_normal_radius_spin)
+        comparison_layout.addRow("Maximum normal neighbours:", self.comparison_normal_neighbours_spin)
+        comparison_layout.addRow("Normal orientation:", self.comparison_normal_orientation_combo)
+        comparison_layout.addRow("Axial measurement range:", self.comparison_axial_range_spin)
         comparison_layout.addRow("Error-map colouring:", self.comparison_colour_mode_combo)
+        comparison_layout.addRow("Heatmap scale:", self.comparison_scale_mode_combo)
+        comparison_layout.addRow("Heatmap minimum:", self.error_map_min_spin)
         comparison_layout.addRow("Heatmap maximum:", self.error_map_max_spin)
         comparison_layout.addRow("", self.btn_calculate_error)
         comparison_layout.addRow("", self.comparison_show_map_check)
         comparison_layout.addRow("", self.comparison_highlight_mean_check)
+        comparison_layout.addRow("Result status:", self.comparison_status)
         comparison_layout.addRow("Last result:", self.comparison_summary)
+        comparison_layout.addRow("", self.btn_comparison_report)
         comparison_group.setLayout(comparison_layout)
         fine_alignment_layout.addWidget(comparison_group)
+        def update_error_controls(*_):
+            signed = self.comparison_method_combo.currentData() == "signed_normal"
+            for widget in (self.comparison_normal_radius_spin, self.comparison_normal_neighbours_spin,
+                           self.comparison_normal_orientation_combo):
+                widget.setEnabled(signed)
+            manual = self.comparison_scale_mode_combo.currentData() == "manual"
+            self.error_map_min_spin.setEnabled(manual)
+            self.error_map_max_spin.setRange(-1_000_000.0 if manual else 0.0, 1_000_000.0)
+            self.error_map_max_spin.setSpecialValueText("" if manual else "Auto (P95)")
+        self.comparison_method_combo.currentIndexChanged.connect(update_error_controls)
+        self.comparison_scale_mode_combo.currentIndexChanged.connect(update_error_controls)
+        self._update_error_controls = update_error_controls
+        update_error_controls()
 
         export_options_group = QGroupBox("Export Appearance")
         export_options_layout = QFormLayout()
@@ -613,9 +693,10 @@ class ControlPanel(QWidget):
             lambda checked: self.export_heatmap_check.setChecked(False) if checked else None
         )
         self.export_heatmap_colormap_combo = QComboBox()
-        self.export_heatmap_colormap_combo.addItems(
-            ["turbo", "viridis", "plasma", "inferno", "magma", "cividis", "coolwarm"]
-        )
+        self.export_heatmap_colormap_combo.addItem("Automatic (by error method)", "auto")
+        self.export_heatmap_colormap_combo.addItem("Blue / white at zero / red", "blue_white_red")
+        for colormap in ["turbo", "viridis", "plasma", "inferno", "magma", "cividis", "coolwarm"]:
+            self.export_heatmap_colormap_combo.addItem(colormap, colormap)
         self.export_heightmap_colormap_combo = QComboBox()
         self.export_heightmap_colormap_combo.addItems(
             ["viridis", "turbo", "plasma", "inferno", "magma", "cividis", "coolwarm"]
@@ -640,6 +721,52 @@ class ControlPanel(QWidget):
         self.export_colourbar_label.setToolTip(
             "Custom colour-bar label; press Enter to add a line break. "
             "Leave empty to use the automatic label with the current unit and colour limit."
+        )
+        for name, description in (
+            ("axis_label", "X, Y and Z axis labels"),
+            ("axis_tick", "Numbers on the X, Y and Z axes"),
+            ("colourbar_label", "Colour-bar label"),
+            ("colourbar_tick", "Numbers on the colour-bar scale"),
+        ):
+            font_size_spin = QDoubleSpinBox()
+            font_size_spin.setRange(1.0, 72.0)
+            font_size_spin.setValue(10.0)
+            font_size_spin.setSingleStep(0.5)
+            font_size_spin.setDecimals(1)
+            font_size_spin.setSuffix(" pt")
+            font_size_spin.setToolTip(f"{description} font size in points for export and preview.")
+            setattr(self, f"export_{name}_font_size_spin", font_size_spin)
+        self.export_z_label_spacing_spin = QDoubleSpinBox()
+        self.export_z_label_spacing_spin.setRange(0.0, 200.0)
+        self.export_z_label_spacing_spin.setDecimals(1)
+        self.export_z_label_spacing_spin.setSuffix(" pt")
+        self.export_z_label_spacing_spin.setSpecialValueText("Auto")
+        self.export_z_label_spacing_spin.setToolTip("Gap between Z-axis numbers and title; Auto scales with the label font size.")
+        self.export_z_tick_label_gap_spin = QDoubleSpinBox()
+        self.export_z_tick_label_gap_spin.setRange(0.0, 200.0)
+        self.export_z_tick_label_gap_spin.setDecimals(1)
+        self.export_z_tick_label_gap_spin.setSuffix(" pt")
+        self.export_z_tick_label_gap_spin.setSpecialValueText("Default")
+        self.export_z_tick_label_gap_spin.setToolTip(
+            "Minimum empty space between adjacent Z-axis tick numbers. "
+            "Expands the displayed Z-axis height without changing coordinates or tick values. "
+            "Default keeps the current axis proportions."
+        )
+        self.export_z_ticks_spin = QSpinBox()
+        self.export_z_ticks_spin.setRange(0, 20)
+        self.export_z_ticks_spin.setSpecialValueText("Auto")
+        self.export_z_ticks_spin.setToolTip("Exact number of evenly spaced Z-axis ticks. Auto reduces ticks to avoid overlapping numbers.")
+        self.export_z_tick_interval_spin = QDoubleSpinBox()
+        self.export_z_tick_interval_spin.setRange(0.0, 1e9)
+        self.export_z_tick_interval_spin.setDecimals(4)
+        self.export_z_tick_interval_spin.setSingleStep(1.0)
+        self.export_z_tick_interval_spin.setSpecialValueText("Auto / tick count")
+        self.export_z_tick_interval_spin.setToolTip(
+            "Tick spacing in axis units. For example, 10 places ticks at -20, -10, 0, 10, 20, etc. "
+            "A positive interval overrides the tick count; 0 uses Auto or the selected count."
+        )
+        self.export_z_tick_interval_spin.valueChanged.connect(
+            lambda interval: self.export_z_ticks_spin.setEnabled(interval == 0)
         )
         self.export_point_size_spin = QDoubleSpinBox()
         self.export_point_size_spin.setRange(0.1, 20.0)
@@ -686,10 +813,18 @@ class ControlPanel(QWidget):
         export_options_layout.addRow("Colour-bar height:", self.export_colourbar_height_spin)
         export_options_layout.addRow("Colour-bar decimal places:", self.export_colourbar_decimals_spin)
         export_options_layout.addRow("Colour-bar label:", self.export_colourbar_label)
+        export_options_layout.addRow("Colour-bar label font size:", self.export_colourbar_label_font_size_spin)
+        export_options_layout.addRow("Colour-bar numbers font size:", self.export_colourbar_tick_font_size_spin)
         export_options_layout.addRow("Point size:", self.export_point_size_spin)
         export_options_layout.addRow("X-axis label:", self.export_x_axis_name)
         export_options_layout.addRow("Y-axis label:", self.export_y_axis_name)
         export_options_layout.addRow("Z-axis label:", self.export_z_axis_name)
+        export_options_layout.addRow("Axis label font size:", self.export_axis_label_font_size_spin)
+        export_options_layout.addRow("Axis numbers font size:", self.export_axis_tick_font_size_spin)
+        export_options_layout.addRow("Z-axis title gap:", self.export_z_label_spacing_spin)
+        export_options_layout.addRow("Z-axis tick label gap:", self.export_z_tick_label_gap_spin)
+        export_options_layout.addRow("Z-axis tick interval:", self.export_z_tick_interval_spin)
+        export_options_layout.addRow("Number of Z-axis ticks:", self.export_z_ticks_spin)
         export_options_layout.addRow("Legend:", self.export_show_legend_check)
         export_options_layout.addRow("Legend point size:", self.export_legend_point_size_spin)
         export_options_layout.addRow("Legend placement:", self.export_legend_placement_combo)
@@ -773,6 +908,65 @@ class ControlPanel(QWidget):
         self.error_map_max_spin.blockSignals(True)
         self.error_map_max_spin.setValue(float(maximum))
         self.error_map_max_spin.blockSignals(False)
+
+    def get_surface_error_options(self) -> dict:
+        return {
+            "edge_margin": self.comparison_cutoff_spin.value(),
+            "max_analysis_points": self.comparison_points_spin.value(),
+            "colour_mode": self.comparison_colour_mode_combo.currentData(),
+            "heatmap_max": self.error_map_max_spin.value(),
+            "show_error_map": self.comparison_show_map_check.isChecked(),
+            "highlight_above_mean": self.comparison_highlight_mean_check.isChecked(),
+            "error_method": self.comparison_method_combo.currentData(),
+            "normal_radius": self.comparison_normal_radius_spin.value(),
+            "normal_neighbours": self.comparison_normal_neighbours_spin.value(),
+            "normal_orientation": self.comparison_normal_orientation_combo.currentText(),
+            "scale_mode": self.comparison_scale_mode_combo.currentData(),
+            "heatmap_min": self.error_map_min_spin.value(),
+            "axial_range": self.comparison_axial_range_spin.value(),
+        }
+
+    def apply_surface_error_options(self, options: dict, reference_index=None):
+        """Restore a source's comparison settings without emitting edits."""
+        widgets = (
+            self.comparison_target_combo, self.comparison_cutoff_spin,
+            self.comparison_points_spin, self.comparison_colour_mode_combo,
+            self.error_map_max_spin, self.comparison_show_map_check,
+            self.comparison_highlight_mean_check,
+            self.comparison_method_combo, self.comparison_normal_radius_spin,
+            self.comparison_normal_neighbours_spin, self.comparison_normal_orientation_combo,
+            self.comparison_scale_mode_combo, self.error_map_min_spin,
+            self.comparison_axial_range_spin,
+        )
+        previous_blocks = [widget.blockSignals(True) for widget in widgets]
+        try:
+            manual = options.get("scale_mode", "auto") == "manual"
+            self.error_map_max_spin.setRange(-1_000_000.0 if manual else 0.0, 1_000_000.0)
+            if reference_index is not None:
+                self.comparison_target_combo.setCurrentIndex(reference_index)
+            self.comparison_cutoff_spin.setValue(float(options.get("edge_margin", 1.0)))
+            self.comparison_points_spin.setValue(int(options.get("max_analysis_points", 0)))
+            mode_index = self.comparison_colour_mode_combo.findData(options.get("colour_mode", "closest_distance"))
+            self.comparison_colour_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+            self.error_map_max_spin.setValue(float(options.get("heatmap_max", 0.0)))
+            self.comparison_show_map_check.setChecked(bool(options.get("show_error_map", True)))
+            self.comparison_highlight_mean_check.setChecked(bool(options.get("highlight_above_mean", False)))
+            for combo, key, default in (
+                (self.comparison_method_combo, "error_method", "unsigned"),
+                (self.comparison_scale_mode_combo, "scale_mode", "auto"),
+            ):
+                index = combo.findData(options.get(key, default))
+                combo.setCurrentIndex(index if index >= 0 else 0)
+            self.comparison_normal_radius_spin.setValue(float(options.get("normal_radius", 0.0)))
+            self.comparison_normal_neighbours_spin.setValue(int(options.get("normal_neighbours", 30)))
+            self.comparison_normal_orientation_combo.setCurrentText(options.get("normal_orientation", "+Z"))
+            self.error_map_min_spin.setValue(float(options.get("heatmap_min", -1.0)))
+            self.comparison_axial_range_spin.setValue(float(options.get("axial_range") or 0.0))
+        finally:
+            for widget, blocked in zip(widgets, previous_blocks):
+                widget.blockSignals(blocked)
+        self._sync_comparison_selectors(source_changed=True)
+        self._update_error_controls()
             
     def add_dataset_to_list(self, name: str, checked: bool = True):
         item = QListWidgetItem(name)
@@ -969,11 +1163,19 @@ class ControlPanel(QWidget):
         return {
             "use_heatmap": self.export_heatmap_check.isChecked(),
             "use_heightmap": self.export_heightmap_check.isChecked(),
-            "heatmap_colormap": self.export_heatmap_colormap_combo.currentText(),
+            "heatmap_colormap": self.export_heatmap_colormap_combo.currentData(),
             "heightmap_colormap": self.export_heightmap_colormap_combo.currentText(),
             "colourbar_height": self.export_colourbar_height_spin.value(),
             "colourbar_decimals": self.export_colourbar_decimals_spin.value(),
             "colourbar_label": self.export_colourbar_label.toPlainText(),
+            "colourbar_label_font_size": self.export_colourbar_label_font_size_spin.value(),
+            "colourbar_tick_font_size": self.export_colourbar_tick_font_size_spin.value(),
+            "axis_label_font_size": self.export_axis_label_font_size_spin.value(),
+            "axis_tick_font_size": self.export_axis_tick_font_size_spin.value(),
+            "z_axis_label_spacing": self.export_z_label_spacing_spin.value(),
+            "z_axis_tick_label_gap": self.export_z_tick_label_gap_spin.value(),
+            "z_axis_ticks": self.export_z_ticks_spin.value(),
+            "z_axis_tick_interval": self.export_z_tick_interval_spin.value(),
             "point_size": self.export_point_size_spin.value(),
             "x_label": self.export_x_axis_name.text() or "X",
             "y_label": self.export_y_axis_name.text() or "Y",
@@ -996,15 +1198,24 @@ class ControlPanel(QWidget):
         """Load a previously saved export appearance without changing data settings."""
         self.export_heatmap_check.setChecked(bool(options.get("use_heatmap", True)))
         self.export_heightmap_check.setChecked(bool(options.get("use_heightmap", False)))
-        self.export_heatmap_colormap_combo.setCurrentText(options.get("heatmap_colormap", "turbo"))
+        colormap_index = self.export_heatmap_colormap_combo.findData(options.get("heatmap_colormap", "auto"))
+        self.export_heatmap_colormap_combo.setCurrentIndex(colormap_index if colormap_index >= 0 else 0)
         self.export_heightmap_colormap_combo.setCurrentText(options.get("heightmap_colormap", "viridis"))
         self.export_colourbar_height_spin.setValue(float(options.get("colourbar_height", 1.0)))
         self.export_colourbar_decimals_spin.setValue(int(options.get("colourbar_decimals", 2)))
         self.export_colourbar_label.setPlainText(options.get("colourbar_label", ""))
+        for name in ("axis_label", "axis_tick", "colourbar_label", "colourbar_tick"):
+            getattr(self, f"export_{name}_font_size_spin").setValue(
+                float(options.get(f"{name}_font_size", 10.0))
+            )
         self.export_point_size_spin.setValue(float(options.get("point_size", 2.0)))
         self.export_x_axis_name.setText(options.get("x_label", "X"))
         self.export_y_axis_name.setText(options.get("y_label", "Y"))
         self.export_z_axis_name.setText(options.get("z_label", "Z"))
+        self.export_z_label_spacing_spin.setValue(float(options.get("z_axis_label_spacing", 0.0)))
+        self.export_z_tick_label_gap_spin.setValue(float(options.get("z_axis_tick_label_gap", 0.0)))
+        self.export_z_ticks_spin.setValue(int(options.get("z_axis_ticks", options.get("z_axis_max_ticks", 0))))
+        self.export_z_tick_interval_spin.setValue(float(options.get("z_axis_tick_interval", 0.0)))
         self.export_show_legend_check.setChecked(bool(options.get("show_legend", True)))
         self.export_legend_point_size_spin.setValue(float(options.get("legend_point_size", 16.0)))
         position = options.get("legend_position", "upper right")
@@ -1114,7 +1325,27 @@ class ControlPanel(QWidget):
             )
 
     def set_comparison_summary(self, summary: str):
+        self.comparison_summary.setTextFormat(Qt.TextFormat.PlainText)
         self.comparison_summary.setText(summary)
+
+    def set_comparison_report(self, report, options=None):
+        """Show availability and journal metrics separately from calculation controls."""
+        from html import escape
+        from src.utils.error_report import headline_rows, report_method, report_status
+
+        status, available, state = report_status(report, options)
+        self.comparison_status.setText(status)
+        colour = {"ready": "#16803c", "warning": "#a06000", "empty": "#777777"}[state]
+        self.comparison_status.setStyleSheet(f"color: {colour}; font-weight: bold;")
+        self.btn_comparison_report.setEnabled(available)
+        self.comparison_summary.setTextFormat(Qt.TextFormat.RichText)
+        if not available:
+            self.comparison_summary.setText("—")
+            return
+        method = "Signed normal deviations" if report_method(report) == "signed_normal" else "Unsigned nearest-point distances"
+        rows = "".join(f"<tr><td>{escape(name)}</td><td align='right'><b>{escape(value)}</b></td></tr>"
+                       for name, value in headline_rows(report))
+        self.comparison_summary.setText(f"<b>{method}</b><br><table cellspacing='6'>{rows}</table>")
             
     def update_columns(self, columns: list):
         self.color_combo.blockSignals(True)

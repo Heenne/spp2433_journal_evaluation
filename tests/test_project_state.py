@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 import pandas as pd
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtTest import QTest
 
 from src.ui.main_window import MainWindow
 from src.ui import main_window as main_window_module
@@ -34,12 +36,17 @@ class ProjectStateTests(unittest.TestCase):
 
     def test_error_report_separates_coverage_and_handles_old_saved_reports(self):
         points = pd.DataFrame([(x, y, 0.0) for x in range(11) for y in range(11)], columns=["X", "Y", "Z"])
-        report = calculate_cloud_error(points, points, 1.0)
+        report = calculate_cloud_error(points, points, 1.0, axial_range=200)
         text = MainWindow._format_error_report(report)
         self.assertIn("System points within reference area [%]: 100.0%", text)
         self.assertIn("Reference area covered [%]: 100.0%", text)
         restored = json.loads(json.dumps(report))
         self.assertEqual(MainWindow._format_error_report(restored), text)
+        self.assertEqual(restored["axial_range"], 200)
+        self.assertEqual(restored["normalized_standard_deviation_percent"], 0)
+        self.assertEqual(restored["coverage_interval_90"], [0, 0])
+        self.assertIn("Normalized SD", text)
+        self.assertNotIn("median:", text)
         old = {key: value for key, value in report.items()
                if not key.startswith(("system_points_", "reference_area", "coverage_"))}
         self.assertIn("Reference area covered [%]: not saved; recalculate", MainWindow._format_error_report(old))
@@ -62,6 +69,7 @@ class ProjectStateTests(unittest.TestCase):
                 "source_input": MainWindow._comparison_input_signature(source),
                 "reference_input": MainWindow._comparison_input_signature(reference),
                 "p95": 0.4,
+                "heatmap_max": 2.5,
             }
             stub = SimpleNamespace(
                 datasets=[source, reference],
@@ -77,6 +85,76 @@ class ProjectStateTests(unittest.TestCase):
             stub._pending_project_comparisons = [{"filepath": source_path, "last_comparison": report}]
             MainWindow._restore_saved_comparisons(stub)
             self.assertNotIn("last_comparison", source)
+            self.assertEqual(source["surface_error_settings"]["heatmap_max"], 2.5)
+
+    def test_surface_error_settings_survive_save_and_reopen_before_calculation(self):
+        window = MainWindow()
+        reopened = MainWindow()
+        window.add_recent_project = reopened.add_recent_project = lambda _: None
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                points = pd.DataFrame([[0., 0., 0.], [1., 1., 0.]], columns=["X", "Y", "Z"])
+                paths = [os.path.join(directory, name) for name in ("reference.csv", "source.csv")]
+                for path in paths:
+                    points.to_csv(path, index=False)
+                    window.datasets.append({
+                        "filepath": path, "name": os.path.basename(path), "visible": True,
+                        "df": points, "df_filtered": points, "settings": {}, "add_cols": [],
+                    })
+                    window.control_panel.add_dataset_to_list(os.path.basename(path))
+                panel = window.control_panel
+                panel.comparison_source_combo.setCurrentIndex(1)
+                panel.comparison_method_combo.setCurrentIndex(1)
+                panel.comparison_normal_radius_spin.setValue(0.75)
+                panel.comparison_normal_neighbours_spin.setValue(20)
+                panel.comparison_normal_orientation_combo.setCurrentText("-Z")
+                panel.comparison_axial_range_spin.setValue(200.0)
+                panel.comparison_scale_mode_combo.setCurrentIndex(2)
+                panel.error_map_min_spin.setValue(-1.5)
+                panel.comparison_cutoff_spin.setValue(0.125)
+                panel.comparison_points_spin.setValue(25000)
+                panel.comparison_colour_mode_combo.setCurrentIndex(1)
+                panel.error_map_max_spin.setValue(2.75)
+                panel.comparison_show_map_check.setChecked(False)
+                panel.comparison_highlight_mean_check.setChecked(True)
+                self.assertTrue(window.project_dirty)
+                expected = panel.get_surface_error_options()
+
+                # A cloud edit invalidates reports without clearing configuration.
+                panel.tx_spin.setValue(0.2)
+                self.assertEqual(panel.get_surface_error_options(), expected)
+                panel.comparison_source_combo.setCurrentIndex(0)
+                panel.comparison_source_combo.setCurrentIndex(1)
+                self.assertEqual(panel.get_surface_error_options(), expected)
+                window.move_dataset(1, 0)
+                self.assertEqual(panel.get_surface_error_options(), expected)
+                window.move_dataset(0, 1)
+                self.assertEqual(panel.get_surface_error_options(), expected)
+
+                project_path = os.path.join(directory, "project.json")
+                self.assertTrue(window._save_project_to_file(project_path))
+                with open(project_path) as project_file:
+                    saved = json.load(project_file)
+                self.assertNotIn("last_comparison", saved["datasets"][1])
+                self.assertEqual(saved["datasets"][1]["surface_error_settings"]["heatmap_max"], 2.75)
+
+                reopened.open_specific_project(project_path)
+                deadline = time.monotonic() + 10
+                while (len(reopened.datasets) < 2 or reopened._pending_project_comparisons) and time.monotonic() < deadline:
+                    QTest.qWait(10)
+                self.assertEqual(len(reopened.datasets), 2)
+                self.assertFalse(reopened._pending_project_comparisons)
+                self.assertEqual(reopened.control_panel.comparison_source_combo.currentIndex(), 1)
+                self.assertEqual(reopened.control_panel.comparison_target_combo.currentIndex(), 0)
+                self.assertEqual(reopened.control_panel.get_surface_error_options(), expected)
+                self.assertFalse(reopened.project_dirty)
+        finally:
+            for active_window in (window, reopened):
+                worker = getattr(active_window, "load_worker", None)
+                if worker is not None and worker.isRunning():
+                    worker.cancel()
+                    worker.wait()
+                active_window.deleteLater()
 
     def test_surface_error_completion_keeps_requested_heatmap_maximum(self):
         class Signal:
@@ -94,6 +172,7 @@ class ProjectStateTests(unittest.TestCase):
 
         source = {"name": "source", "filepath": "source.csv"}
         reference = {"name": "reference", "filepath": "reference.csv"}
+        events = []
         panel = SimpleNamespace(
             error_map_max_spin=SimpleNamespace(value=lambda: 2.5),
             dataset_list=SimpleNamespace(currentRow=lambda: 0),
@@ -102,12 +181,15 @@ class ProjectStateTests(unittest.TestCase):
         )
         window = SimpleNamespace(
             datasets=[source, reference], control_panel=panel,
-            set_loading_state=lambda *_: None, set_project_dirty=lambda *_: None,
+            set_loading_state=lambda loading, *_: events.append(("loading", loading)), set_project_dirty=lambda *_: None,
             run_comparison_background=lambda *_: None,
-            statusBar=lambda: SimpleNamespace(showMessage=lambda *_: None),
-            plot_canvas=SimpleNamespace(plot_datasets=lambda *_: None),
+            statusBar=lambda: SimpleNamespace(showMessage=lambda message: events.append(("status", message)), repaint=lambda: None),
+            plot_canvas=SimpleNamespace(plot_datasets=lambda *_: events.append(("assemble", None)),
+                                        finish_pending_draw=lambda: events.append(("render", None))),
             _comparison_input_signature=lambda *_: {},
             _format_error_report=lambda *_: "report",
+            _refresh_comparison_report=lambda: None,
+            show_surface_error_report=lambda *_: events.append(("report", None)),
         )
         with patch.object(main_window_module, "WorkerThread", Worker), \
                 patch.object(main_window_module.QMessageBox, "information"):
@@ -117,6 +199,8 @@ class ProjectStateTests(unittest.TestCase):
             window.comparison_worker.finished.callback((report, {}, source, reference))
         self.assertEqual(report["heatmap_max"], 2.5)
         self.assertEqual(source["error_visualization"]["heatmap_max"], 2.5)
+        self.assertIn(("status", "Error statistics ready — preparing interactive point-cloud preview..."), events)
+        self.assertEqual(events[-3:], [("render", None), ("loading", False), ("report", None)])
 
     def test_project_save_keeps_dataset_order_and_visibility(self):
         window = MainWindow()

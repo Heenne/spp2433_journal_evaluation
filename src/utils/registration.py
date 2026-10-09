@@ -1088,14 +1088,60 @@ def global_automatic_registration(source_df: pd.DataFrame, target_df: pd.DataFra
     }
 
 
+def _local_reference_planes(points, radius, max_neighbours, direction,
+                            progress_callback=None, is_cancelled_callback=None):
+    """PCA planes on the full reference, with explicitly oriented normals."""
+    from scipy.spatial import cKDTree
+
+    # Duplicate coordinates must not collapse auto spacing or count as independent support.
+    points, original_indices = np.unique(points, axis=0, return_inverse=True)
+    tree = cKDTree(points)
+    # Estimate spacing against the full cloud, independent of source sampling.
+    sample = points[np.linspace(0, len(points) - 1, min(len(points), 20_000), dtype=int)]
+    spacing, _ = tree.query(sample, k=2, workers=-1)
+    positive = spacing[:, 1][np.isfinite(spacing[:, 1]) & (spacing[:, 1] > 0)]
+    effective_radius = float(radius) or (3.0 * float(np.median(positive)) if len(positive) else 0.0)
+    centres = np.full_like(points, np.nan)
+    normals = np.full_like(points, np.nan)
+    if len(points) < 3 or effective_radius <= 0:
+        return centres[original_indices], normals[original_indices], effective_radius
+    k = min(int(max_neighbours), len(points))
+    orientation = np.asarray(direction, dtype=float)
+    orientation /= np.linalg.norm(orientation)
+    for start in range(0, len(points), 10_000):
+        _check_cancelled(is_cancelled_callback)
+        stop = min(start + 10_000, len(points))
+        distances, indices = tree.query(points[start:stop], k=k,
+                                        distance_upper_bound=effective_radius, workers=-1)
+        supported = np.isfinite(distances)
+        neighbours = points[np.minimum(indices, len(points) - 1)]
+        counts = supported.sum(axis=1)
+        centre = np.sum(np.where(supported[..., None], neighbours, 0.0), axis=1) / np.maximum(counts, 1)[:, None]
+        offsets = np.where(supported[..., None], neighbours - centre[:, None, :], 0.0)
+        covariance = np.einsum("nki,nkj->nij", offsets, offsets) / np.maximum(counts, 1)[:, None, None]
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        normal = eigenvectors[:, :, 0]
+        alignment = normal @ orientation
+        # Reject collinear, non-planar, or orientation-ambiguous neighbourhoods.
+        valid = ((counts >= 3) & (eigenvalues[:, 1] > np.maximum(eigenvalues[:, 2], 1e-30) * 1e-8)
+                 & (eigenvalues[:, 0] <= 0.25 * eigenvalues[:, 1]) & (np.abs(alignment) > 1e-6))
+        normal[alignment < 0] *= -1
+        centres[start:stop][valid] = centre[valid]
+        normals[start:stop][valid] = normal[valid]
+        _emit(progress_callback, f"Estimating reference normals: {stop:,} / {len(points):,}...")
+    return centres[original_indices], normals[original_indices], effective_radius
+
+
 def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
                           max_distance: float, max_analysis_points: int = 0,
                           chunk_size: int = 100_000,
                           progress_callback: ProgressCallback = None,
                           is_cancelled_callback: CancelledCallback = None,
                           include_pointwise: bool = False,
-                          distance_unit: str = "mm"):
-    """Calculate unsigned source-to-reference surface deviations.
+                          distance_unit: str = "mm", error_method: str = "unsigned",
+                          normal_radius: float = 0.0, normal_neighbours: int = 30,
+                          normal_orientation: str = "+Z", axial_range: float = 0.0):
+    """Calculate nearest-point magnitudes or signed local PCA-plane deviations.
 
     System points within reference area is a point fraction; reference area
     covered integrates equal-area X/Y mask cells. Both use the full clouds.
@@ -1104,6 +1150,10 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
     controls only the maximum width of that edge band.
     """
     from scipy.spatial import cKDTree
+    from src.utils.error_report import update_report_metrics
+
+    if not np.isfinite(axial_range) or axial_range < 0:
+        raise ValueError("Axial range must be a finite, nonnegative span in the error distance unit.")
 
     source_points = _points_from_dataframe(source_df)
     reference_points = _points_from_dataframe(reference_df)
@@ -1111,6 +1161,14 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
         raise ValueError("Both point clouds need finite XYZ points for comparison.")
     if max_distance <= 0:
         raise ValueError("The reference edge margin must be greater than zero.")
+    if error_method not in ("unsigned", "signed_normal"):
+        raise ValueError("Unknown surface-error method.")
+    directions = {"+X": (1, 0, 0), "-X": (-1, 0, 0), "+Y": (0, 1, 0),
+                  "-Y": (0, -1, 0), "+Z": (0, 0, 1), "-Z": (0, 0, -1)}
+    if error_method == "signed_normal" and (
+            not np.isfinite(normal_radius) or normal_radius < 0 or normal_neighbours < 3
+            or normal_orientation not in directions):
+        raise ValueError("Normals require a nonnegative radius, at least three neighbours, and an orientation axis.")
 
     distance_unit = str(distance_unit).strip() or "mm"
     source_total = len(source_points)
@@ -1145,6 +1203,17 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
     )
     _emit(progress_callback, f"Building nearest-neighbour index for {len(comparison_reference_points):,} reference points...")
     reference_tree = cKDTree(comparison_reference_points)
+    effective_normal_radius = None
+    if error_method == "signed_normal":
+        plane_centres, reference_normals, effective_normal_radius = _local_reference_planes(
+            reference_points, normal_radius, normal_neighbours, directions[normal_orientation],
+            progress_callback, is_cancelled_callback,
+        )
+        if len(comparison_reference_points) == len(reference_points):
+            comparison_centres, comparison_normals = plane_centres, reference_normals
+        else:
+            comparison_centres = plane_centres[reference_footprint]
+            comparison_normals = reference_normals[reference_footprint]
     distances = np.empty(len(source_points), dtype=np.float64)
     distances.fill(np.inf)
     footprint_indices = np.flatnonzero(source_footprint)
@@ -1152,9 +1221,16 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
         _check_cancelled(is_cancelled_callback)
         stop = min(start + max(1, int(chunk_size)), len(footprint_indices))
         indices = footprint_indices[start:stop]
-        distances[indices], _ = reference_tree.query(
+        nearest_distances, nearest_indices = reference_tree.query(
             source_points[indices], k=1, workers=-1
         )
+        if error_method == "signed_normal":
+            distances[indices] = np.einsum(
+                "ij,ij->i", source_points[indices] - comparison_centres[nearest_indices],
+                comparison_normals[nearest_indices],
+            )
+        else:
+            distances[indices] = nearest_distances
         _emit(progress_callback, f"Comparing surface distances: {stop:,} / {len(footprint_indices):,} footprint points...")
 
     valid_error = np.isfinite(distances)
@@ -1164,7 +1240,14 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
     analysed_xy_overlap_count = int(np.count_nonzero(analysed_xy_coverage))
     inside_edge_count = int(np.count_nonzero(source_footprint))
     report = {
-        "metric": "unsigned nearest-reference Euclidean distance",
+        "metric": ("signed local reference-plane distance" if error_method == "signed_normal"
+                   else "unsigned nearest-reference Euclidean distance"),
+        "error_method": error_method,
+        "normal_radius_setting": float(normal_radius) if error_method == "signed_normal" else None,
+        "normal_radius_effective": effective_normal_radius,
+        "normal_neighbours": int(normal_neighbours) if error_method == "signed_normal" else None,
+        "normal_orientation": normal_orientation if error_method == "signed_normal" else None,
+        "normal_invalid_points": int(np.count_nonzero(source_footprint & ~valid_error)),
         "unit": distance_unit,
         "source_points_total": int(source_total),
         "source_points_analysed": int(len(source_points)),
@@ -1201,17 +1284,26 @@ def calculate_cloud_error(source_df: pd.DataFrame, reference_df: pd.DataFrame,
             "minimum": float(np.min(overlap_distances)),
             "mean": float(np.mean(overlap_distances)),
             "median": float(np.median(overlap_distances)),
+            "standard_deviation": float(np.std(overlap_distances, ddof=1)) if evaluated_count > 1 else None,
             "p5": float(np.percentile(overlap_distances, 5)),
+            "p2_5": float(np.percentile(overlap_distances, 2.5)),
+            "p97_5": float(np.percentile(overlap_distances, 97.5)),
             "rmse": float(np.sqrt(np.mean(np.square(overlap_distances)))),
             "p95": float(np.percentile(overlap_distances, 95)),
             "maximum": float(np.max(overlap_distances)),
         })
     else:
-        report.update({"minimum": None, "mean": None, "median": None, "p5": None,
-                       "rmse": None, "p95": None, "maximum": None})
+        report.update({"minimum": None, "mean": None, "median": None, "standard_deviation": None, "p5": None,
+                       "rmse": None, "p95": None, "p2_5": None, "p97_5": None, "maximum": None})
+    update_report_metrics(report, axial_range)
+    report["calculation_settings"] = {
+        "error_method": error_method, "edge_margin": float(max_distance),
+        "max_analysis_points": max_analysis_points, "normal_radius": float(normal_radius),
+        "normal_neighbours": int(normal_neighbours), "normal_orientation": normal_orientation,
+    }
     area_fraction = report["reference_area_covered_fraction"]
     area_display = f"{area_fraction:.1%}" if area_fraction is not None else "unavailable (no 2-D reference area)"
-    _emit(progress_callback, f"Comparison complete: System points within reference area: "
+    _emit(progress_callback, f"Error statistics ready: System points within reference area: "
           f"{report['system_points_within_reference_area_fraction']:.1%}; Reference area covered: {area_display}; "
           f"{evaluated_count:,} points evaluated for error.")
     if include_pointwise:
