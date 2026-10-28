@@ -35,8 +35,16 @@ def error_map_colours(distances, error_map, colormap=None, *, normalization_dist
     cmap = colormap or "auto"
     if cmap == "auto":
         cmap = "blue_white_red" if divergent else "turbo"
-    if cmap == "blue_white_red":
-        base = LinearSegmentedColormap.from_list("signed_blue_white_red", ["blue", "white", "red"], N=257)
+    if cmap in ("blue_white_red", "blue_beige_red"):
+        if cmap == "blue_beige_red":
+            base = LinearSegmentedColormap.from_list(
+                "blue_beige_red",
+                [(0.00, "#2166AC"), (0.25, "#87B5D3"), (0.50, "#C9BFB0"),
+                 (0.75, "#DB9494"), (1.00, "#B2182B")],
+                N=256,
+            )
+        else:
+            base = LinearSegmentedColormap.from_list("signed_blue_white_red", ["blue", "white", "red"], N=257)
         if lower < 0 < upper:
             norm = TwoSlopeNorm(vcenter=0.0, vmin=lower, vmax=upper)
             cmap = base

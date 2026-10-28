@@ -3,6 +3,10 @@ Daten/
 Plots/
 .gemini/
 
+# User-specific application state and local Windows shortcuts
+/app_settings.json
+/*.lnk
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

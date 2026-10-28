@@ -22,6 +22,52 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_unfiltered_live_view_shows_all_points_by_default(self):
+        points = np.random.default_rng(3).normal(size=(120_000, 3))
+        reference = {"name": "reference", "visible": True,
+                     "df_filtered": pd.DataFrame(points, columns=["X", "Y", "Z"]),
+                     "settings": {"base_color": "green"}}
+        source = {"name": "source", "visible": True,
+                  "df_filtered": reference["df_filtered"].iloc[:1000], "settings": {}}
+        canvas = PlotCanvas()
+        try:
+            canvas.plot_datasets([source, reference])
+            self.assertEqual(canvas.preview_point_counts, [(1000, 1000), (120_000, 120_000)])
+            for actual, expected in zip(canvas.axes.collections[1]._offsets3d, points.T):
+                np.testing.assert_array_equal(actual, expected)
+            self.assertEqual(canvas.preview_summary(), "")
+        finally:
+            canvas.deleteLater()
+
+    def test_preview_covers_a_raster_scan_without_sampling_stripes(self):
+        x, y = np.meshgrid(np.arange(1000), np.arange(1000))
+        points = pd.DataFrame({"X": x.ravel(), "Y": y.ravel(), "Z": np.zeros(x.size)})
+        points["intensity"] = points["X"] + 2 * points["Y"]
+        cloud = {"name": "raster scan", "visible": True, "df_filtered": points,
+                 "settings": {"color_col": "intensity"}}
+        canvas = PlotCanvas()
+        try:
+            canvas.MAX_PREVIEW_POINTS = 10_000
+            canvas.plot_datasets([cloud])
+            scatter = canvas.axes.collections[0]
+            px, py, pz = (np.asarray(axis).copy() for axis in scatter._offsets3d)
+            counts, _, _ = np.histogram2d(
+                px, py, bins=40, range=((0, 1000), (0, 1000))
+            )
+            # A uniform plane must remain filled rather than turning into
+            # artificial stripes as row-based sampling aliases with scan order.
+            self.assertGreater(np.count_nonzero(counts) / counts.size, 0.95)
+            self.assertEqual(len(px), 10_000)
+            self.assertEqual(len(set(zip(px, py))), 10_000)
+            np.testing.assert_array_equal(scatter.get_array(), px + 2 * py)
+            np.testing.assert_array_equal(pz, 0)
+            canvas.plot_datasets([cloud])
+            for actual, expected in zip(canvas.axes.collections[0]._offsets3d, (px, py, pz)):
+                np.testing.assert_array_equal(actual, expected)
+            self.assertEqual(len(points), 1_000_000)
+        finally:
+            canvas.deleteLater()
+
     def test_preview_budget_preserves_full_error_data_colour_scale_and_extent(self):
         points = np.random.default_rng(2).normal(size=(1000, 3))
         points[123, 0] = 1000.

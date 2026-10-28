@@ -695,11 +695,12 @@ class ControlPanel(QWidget):
         self.export_heatmap_colormap_combo = QComboBox()
         self.export_heatmap_colormap_combo.addItem("Automatic (by error method)", "auto")
         self.export_heatmap_colormap_combo.addItem("Blue / white at zero / red", "blue_white_red")
+        self.export_heatmap_colormap_combo.addItem("Blue / beige at zero / red", "blue_beige_red")
         for colormap in ["turbo", "viridis", "plasma", "inferno", "magma", "cividis", "coolwarm"]:
             self.export_heatmap_colormap_combo.addItem(colormap, colormap)
         self.export_heightmap_colormap_combo = QComboBox()
         self.export_heightmap_colormap_combo.addItems(
-            ["viridis", "turbo", "plasma", "inferno", "magma", "cividis", "coolwarm"]
+            ["viridis", "turbo", "plasma", "inferno", "magma", "cividis", "coolwarm", "height_blue_rose"]
         )
         self.export_colourbar_height_spin = QDoubleSpinBox()
         self.export_colourbar_height_spin.setRange(0.1, 1.0)

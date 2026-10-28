@@ -7,7 +7,9 @@ import matplotlib.cm as cm
 from src.utils.error_mapping import error_map_colours
 
 class PlotCanvas(FigureCanvas):
-    MAX_PREVIEW_POINTS = 100_000
+    # Show the full filtered clouds by default. A preview budget can still be
+    # set explicitly, but must not silently reduce an unfiltered live view.
+    MAX_PREVIEW_POINTS = None
 
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         self._rendering_suspended = False
@@ -163,7 +165,10 @@ class PlotCanvas(FigureCanvas):
         visible_datasets = [d for d in datasets if d.get("visible", False) and "df_filtered" in d and not d["df_filtered"].empty]
         self.preview_point_counts = []
         self._preview_notice.set_text("")
-        per_cloud_limit = max(1, self.MAX_PREVIEW_POINTS // max(1, len(visible_datasets)))
+        per_cloud_limit = (
+            max(1, self.MAX_PREVIEW_POINTS // max(1, len(visible_datasets)))
+            if self.MAX_PREVIEW_POINTS is not None else None
+        )
         
         if not visible_datasets:
             self._visible_dataset_ids = ()
@@ -204,7 +209,14 @@ class PlotCanvas(FigureCanvas):
             y_min, y_max = min(y_min, np.nanmin(y)), max(y_max, np.nanmax(y))
             z_min, z_max = min(z_min, np.nanmin(z)), max(z_max, np.nanmax(z))
             full_count = len(x)
-            indices = np.linspace(0, full_count - 1, per_cloud_limit, dtype=np.int64) if full_count > per_cloud_limit else None
+            indices = None
+            if per_cloud_limit is not None and full_count > per_cloud_limit:
+                # Regular row strides alias with raster/scan-line acquisition
+                # order, turning smooth surfaces into artificial bands. A fixed
+                # random sample avoids that pattern and stays stable on refresh.
+                indices = np.sort(np.random.default_rng(0).choice(
+                    full_count, size=per_cloud_limit, replace=False
+                ))
             normalization_distances = None
             if error_map is not None and indices is not None:
                 full_overlap = np.isfinite(distances)

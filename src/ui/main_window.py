@@ -30,6 +30,7 @@ from src.ui.error_report_dialog import ErrorReportDialog
 from src.ui.application_identity import application_icon
 from src.utils.export_layout import layout_export_z_axis
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.colors import LinearSegmentedColormap
 
 
 class PointCloudNavigationToolbar(NavigationToolbar):
@@ -1620,6 +1621,13 @@ class MainWindow(QMainWindow):
         heightmap_frames = {}
         height_min = height_max = None
         if heightmap_enabled:
+            height_cmap = export_options.get("heightmap_colormap", "viridis")
+            if height_cmap == "height_blue_rose":
+                height_cmap = LinearSegmentedColormap.from_list(
+                    "height_blue_rose",
+                    ["#304D8B", "#5C80B7", "#93A8CC", "#CCB6C7", "#E9BAB1"],
+                    N=256,
+                )
             heights = []
             for dataset in visible:
                 df = dataset.get("df_filtered") if use_display_points else self._apply_quality_filters(dataset)
@@ -1697,7 +1705,7 @@ class MainWindow(QMainWindow):
             if heightmap_enabled:
                 height_mappable = axes.scatter(
                     points[:, 0], points[:, 1], points[:, 2], c=points[:, 2],
-                    cmap=export_options.get("heightmap_colormap", "viridis"), vmin=height_min, vmax=height_max,
+                    cmap=height_cmap, vmin=height_min, vmax=height_max,
                     marker=".", s=point_size, label=display_label, zorder=zorder,
                     rasterized=rasterize_points, axlim_clip=True,
                 )
