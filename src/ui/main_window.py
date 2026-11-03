@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
     QMessageBox, QMenu, QApplication, QProgressBar, QPushButton, QSplitter,
     QToolBar, QToolButton, QStyle, QDialog, QLabel, QDialogButtonBox,
-    QFormLayout, QDoubleSpinBox, QCheckBox
+    QFormLayout, QDoubleSpinBox, QCheckBox, QSizePolicy
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QPixmap
@@ -60,76 +60,70 @@ class MainWindow(QMainWindow):
         self.init_ui()
         
     def init_ui(self):
-        # Main app actions live in an icon toolbar rather than a traditional
-        # menu bar. Text remains available through tooltips and accessible
-        # action names.
+        # Project actions and appearance controls occupy distinct ends of the top bar.
         self.menuBar().hide()
         self.app_toolbar = QToolBar("Project", self)
+        self.app_toolbar.setObjectName("projectToolbar")
         self.app_toolbar.setMovable(False)
-        self.app_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.app_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.app_toolbar)
 
-        def toolbar_action(icon, text, callback, shortcut=None):
+        def toolbar_action(icon, text, callback, shortcut=None, add=True):
             action = QAction(icon, text, self)
             action.setToolTip(text)
             action.setStatusTip(text)
             if shortcut:
                 action.setShortcut(shortcut)
             action.triggered.connect(callback)
-            self.app_toolbar.addAction(action)
+            if add:
+                self.app_toolbar.addAction(action)
             return action
 
         style = self.style()
+        self.open_project_action = toolbar_action(
+            style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), "Open project", self.open_project_dialog,
+            "Ctrl+Shift+O", add=False,
+        )
+        self.open_project_button = QToolButton(self)
+        self.open_project_button.setObjectName("openProjectButton")
+        self.open_project_button.setDefaultAction(self.open_project_action)
+        self.open_project_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.open_project_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.recent_projects_menu = QMenu(self.open_project_button)
+        self.open_project_button.setMenu(self.recent_projects_menu)
+        self.app_toolbar.addWidget(self.open_project_button)
+        self.update_recent_projects_menu()
+
         self.open_data_action = toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "Open point cloud…", self.open_file_dialog,
+            style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "Add point cloud", self.open_file_dialog,
             "Ctrl+O",
         )
-        self.open_project_action = toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), "Open project…", self.open_project_dialog,
-            "Ctrl+Shift+O",
-        )
+        self.app_toolbar.addSeparator()
         self.save_project_action = toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Save project", self.save_project,
+            style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Save", self.save_project,
             "Ctrl+S",
         )
         self.save_as_project_action = toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder), "Save project as…",
+            style.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder), "Save as",
             self.save_project_as_dialog, "Ctrl+Shift+S",
         )
         self.app_toolbar.addSeparator()
         toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "Convert TXT to CSV…", self.open_convert_dialog
+            style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "TXT to CSV", self.open_convert_dialog
         )
-        toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
-            "Convert pixel coordinates to mm…", self.convert_selected_pixel_coordinates,
-        )
-        toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon), "Select quick reference file…",
-            self.select_quick_reference,
-        )
-        self.recent_projects_button = QToolButton(self)
-        self.recent_projects_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        self.recent_projects_button.setToolTip("Recent projects")
-        self.recent_projects_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.recent_projects_menu = QMenu(self.recent_projects_button)
-        self.recent_projects_button.setMenu(self.recent_projects_menu)
-        self.app_toolbar.addWidget(self.recent_projects_button)
-        self.update_recent_projects_menu()
 
-        self.theme_button = QToolButton(self)
-        self.theme_button.setText("Theme")
-        self.theme_button.setToolTip("Choose the application color theme")
-        self.theme_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.theme_menu = QMenu(self.theme_button)
-        self.light_theme_action = QAction("Light", self.theme_menu, checkable=True)
-        self.dark_theme_action = QAction("Dark", self.theme_menu, checkable=True)
+        spacer = QWidget(self)
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.app_toolbar.addWidget(spacer)
+        self.light_theme_action = QAction("Light", self, checkable=True)
+        self.dark_theme_action = QAction("Dark", self, checkable=True)
         self.light_theme_action.triggered.connect(lambda: self.set_theme("light"))
         self.dark_theme_action.triggered.connect(lambda: self.set_theme("dark"))
-        self.theme_menu.addAction(self.light_theme_action)
-        self.theme_menu.addAction(self.dark_theme_action)
-        self.theme_button.setMenu(self.theme_menu)
-        self.app_toolbar.addWidget(self.theme_button)
+        for action in (self.light_theme_action, self.dark_theme_action):
+            button = QToolButton(self)
+            button.setObjectName("themeChoice")
+            button.setDefaultAction(action)
+            self.app_toolbar.addWidget(button)
         
         # Central Widget
         central_widget = QWidget()
@@ -183,18 +177,28 @@ class MainWindow(QMainWindow):
         self.control_panel.camera_angles_read_requested.connect(self.on_camera_angles_read_requested)
         
         # Plot Canvas
-        plot_layout = QVBoxLayout()
+        plot_widget = QWidget()
+        plot_widget.setObjectName("pointViewer")
+        plot_layout = QVBoxLayout(plot_widget)
+        plot_layout.setContentsMargins(12, 10, 12, 12)
+        plot_layout.setSpacing(8)
         self.plot_canvas = PlotCanvas(self)
         self.toolbar = PointCloudNavigationToolbar(self.plot_canvas, self)
-        
-        plot_layout.addWidget(self.toolbar)
+        self.toolbar.setObjectName("viewerToolbar")
+        viewer_title = QLabel("Point Viewer")
+        viewer_title.setObjectName("sectionHeading")
+        viewer_hint = QLabel("View controls")
+        viewer_hint.setObjectName("sectionHint")
+        plot_layout.addWidget(viewer_title)
+        controls_row = QHBoxLayout()
+        controls_row.addWidget(viewer_hint)
+        controls_row.addWidget(self.toolbar)
+        plot_layout.addLayout(controls_row)
         plot_layout.addWidget(self.plot_canvas)
-        
-        plot_widget = QWidget()
-        plot_widget.setLayout(plot_layout)
 
         sidebar = QWidget()
         sidebar.setObjectName("projectSidebar")
+        sidebar.setMaximumWidth(340)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(14, 16, 14, 14)
         sidebar_layout.setSpacing(10)
@@ -237,6 +241,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             apply_theme(app, theme)
         if hasattr(self, "plot_canvas"):
+        self.control_panel.setMaximumWidth(480)
             self.plot_canvas.set_theme(theme)
         if hasattr(self, "light_theme_action"):
             self.light_theme_action.setChecked(theme == "light")
@@ -335,20 +340,19 @@ class MainWindow(QMainWindow):
             self, "Select Quick Reference CSV", "", "CSV Files (*.csv);;All Files (*)"
         )
         if filepath:
-            from src.utils.app_settings import load_app_settings, save_app_settings
             settings = load_app_settings()
             settings["quick_reference_file"] = filepath
             save_app_settings(settings)
-            QMessageBox.information(self, "Success", f"Quick reference file set to:\n{filepath}")
+        return filepath
             
     def add_quick_reference(self):
-        from src.utils.app_settings import load_app_settings
         settings = load_app_settings()
         ref_file = settings.get("quick_reference_file")
         
         if not ref_file or not os.path.exists(ref_file):
-            QMessageBox.warning(self, "Not Configured", "Please select a quick reference file first in Settings -> Select Quick Reference File...")
-            return
+            ref_file = self.select_quick_reference()
+            if not ref_file:
+                return
             
         self.load_file(ref_file)
         
@@ -378,22 +382,20 @@ class MainWindow(QMainWindow):
             
     def update_recent_projects_menu(self):
         self.recent_projects_menu.clear()
-        from src.utils.app_settings import load_app_settings
         settings = load_app_settings()
         recent = settings.get("recent_projects", [])
-        
-        if not recent:
+        existing = [path for path in recent if os.path.exists(path)]
+        if not existing:
             empty_action = QAction("No recent projects", self)
             empty_action.setEnabled(False)
             self.recent_projects_menu.addAction(empty_action)
             return
-            
-        for fp in recent:
-            if os.path.exists(fp):
-                action = QAction(os.path.basename(fp), self)
-                action.setToolTip(fp)
-                action.triggered.connect(lambda checked, path=fp: self.open_specific_project(path))
-                self.recent_projects_menu.addAction(action)
+
+        for fp in existing:
+            action = QAction(os.path.basename(fp), self)
+            action.setToolTip(fp)
+            action.triggered.connect(lambda checked, path=fp: self.open_specific_project(path))
+            self.recent_projects_menu.addAction(action)
 
     def add_recent_project(self, filepath: str):
         from src.utils.app_settings import load_app_settings, save_app_settings

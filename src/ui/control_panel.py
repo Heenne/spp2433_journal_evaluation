@@ -42,6 +42,8 @@ class ControlPanel(QWidget):
         
     def init_ui(self):
         layout = QVBoxLayout()
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
         
         # --- Global Dataset List ---
         list_group = QGroupBox("Project and datasets")
@@ -876,7 +878,7 @@ class ControlPanel(QWidget):
             scroll.setWidget(widget)
             return scroll
         
-        self.tabs.addTab(tab_data, "Data")
+        self.tabs.addTab(scrollable_tab(tab_data), "Data")
         self.tabs.addTab(scrollable_tab(tab_filter), "Prepare")
 
         align_tab = QWidget()
@@ -889,6 +891,12 @@ class ControlPanel(QWidget):
         self.tabs.addTab(scrollable_tab(tab_fine_alignment), "Evaluate")
         self.tabs.addTab(scrollable_tab(tab_export), "Export")
         
+        tools_heading = QLabel("Workspace tools")
+        tools_heading.setObjectName("sectionHeading")
+        tools_hint = QLabel("Choose a step for the selected point cloud")
+        tools_hint.setObjectName("sectionHint")
+        layout.addWidget(tools_heading)
+        layout.addWidget(tools_hint)
         layout.addWidget(self.tabs)
         self.setLayout(layout)
         
