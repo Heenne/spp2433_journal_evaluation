@@ -30,6 +30,7 @@ class PlotCanvas(FigureCanvas):
         self._has_plotted_data = False
         self._visible_dataset_ids = ()
         self._fitted_limits = None
+        self.theme = "light"
         
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.updateGeometry()
@@ -345,8 +346,41 @@ class PlotCanvas(FigureCanvas):
 
         self._has_plotted_data = True
         self._visible_dataset_ids = visible_dataset_ids
-            
+        self._apply_theme_colors()
         self.draw_idle()
+
+    def set_theme(self, theme: str):
+        """Set plot colors to match the surrounding application theme."""
+        self.theme = "dark" if theme == "dark" else "light"
+        self._apply_theme_colors()
+        self.draw_idle()
+
+    def _apply_theme_colors(self):
+        dark = self.theme == "dark"
+        background = "#171d27" if dark else "#ffffff"
+        axes_background = "#1e2633" if dark else "#ffffff"
+        foreground = "#e6edf7" if dark else "#263244"
+        grid = "#526176" if dark else "#d8dee8"
+        self.fig.patch.set_facecolor(background)
+        self.axes.set_facecolor(axes_background)
+        self.axes.tick_params(colors=foreground)
+        self.axes.xaxis.label.set_color(foreground)
+        self.axes.yaxis.label.set_color(foreground)
+        self.axes.zaxis.label.set_color(foreground)
+        self.axes.title.set_color(foreground)
+        self.axes.grid(color=grid, alpha=0.55)
+        for axis in (self.axes.xaxis, self.axes.yaxis, self.axes.zaxis):
+            axis.pane.set_facecolor(axes_background)
+            axis.pane.set_edgecolor(grid)
+        if self.axes.legend_ is not None:
+            self.axes.legend_.get_frame().set_facecolor(axes_background)
+            self.axes.legend_.get_frame().set_edgecolor(grid)
+            for text in self.axes.legend_.get_texts():
+                text.set_color(foreground)
+        self._preview_notice.set_color(foreground)
+        for colorbar in self.colorbars:
+            colorbar.ax.tick_params(colors=foreground)
+            colorbar.ax.yaxis.label.set_color(foreground)
 
     def preview_summary(self):
         total = sum(full for full, shown in self.preview_point_counts)

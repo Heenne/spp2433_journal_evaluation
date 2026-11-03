@@ -4,6 +4,9 @@ A fast, local Python desktop application built with **PyQt6** and **matplotlib**
 
 ## Features
 
+- **Persistent workspace**: Keep projects and datasets in a left sidebar, the interactive 3-D view in the centre, and contextual Data, Prepare, Align, Evaluate, and Export tools on the right. Direct navigation does not enforce a fixed workflow.
+- **Light and dark themes**: Start with the light theme or switch to dark from the toolbar. The choice is saved in the per-user application settings.
+- **Standalone Windows release**: Build a versioned EXE with `tools/build_windows_exe.ps1`; publishing a GitHub Release triggers the Windows build and attaches the executable. See [Windows partner release](docs/windows-release.md) and the [feature navigation map](docs/feature-navigation.md).
 - **Application Icon**: A blue-white-red point-cloud icon appears in the title bar and running application's Windows taskbar button. Restart the application after updating. Assets are in `src/assets/app_icon.{svg,png,ico}`; rebuild them with `pixi run python tools/generate_app_icon.py`. The ICO includes sizes from 16 to 256 pixels. Windows startup sets the dedicated identity `SPP2433.PointCloudEvaluation` before creating the UI.
 - **Robust CSV Parsing**: Dynamically detects `X`, `Y`, and `Z` coordinates regardless of capitalization, and automatically ignores comment blocks like `//` in the headers. Retains extra columns (Intensity, Return Number, etc.) for visualization.
 - **Smart Filtering & Downsampling**: Includes intuitive sliders to decimate the point cloud (e.g., keep 1 in every 10 points) or take a random percentage sample to keep the application responsive with massive datasets.

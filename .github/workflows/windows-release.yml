@@ -1,0 +1,34 @@
+name: Build Windows release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  windows-executable:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Pixi environment
+        uses: prefix-dev/setup-pixi@v0.11.2
+        with:
+          locked: true
+
+      - name: Build standalone executable
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ github.event.release.tag_name }}
+        run: .\tools\build_windows_exe.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Attach executable to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ github.event.release.tag_name }}
+        run: gh release upload "$env:RELEASE_VERSION" "dist/PointCloudEvaluation-$env:RELEASE_VERSION.exe" --clobber

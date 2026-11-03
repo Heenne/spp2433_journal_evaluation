@@ -28,6 +28,8 @@ from src.utils.error_mapping import error_map_colours
 from src.utils.error_report import update_report_metrics, interval, number
 from src.ui.error_report_dialog import ErrorReportDialog
 from src.ui.application_identity import application_icon
+from src.ui.theme import apply_theme
+from src.utils.app_settings import load_app_settings, save_app_settings
 from src.utils.export_layout import layout_export_z_axis
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.colors import LinearSegmentedColormap
@@ -45,7 +47,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("3D Point Cloud Data Viewer")
         self.setWindowIcon(application_icon())
-        self.resize(1100, 750)
+        self.resize(1500, 900)
+        self.setMinimumSize(1050, 700)
+        self.theme = load_app_settings().get("theme", "light")
+        if self.theme not in {"light", "dark"}:
+            self.theme = "light"
         
         self.datasets = []
         self.project_filepath = None
@@ -110,6 +116,20 @@ class MainWindow(QMainWindow):
         self.recent_projects_button.setMenu(self.recent_projects_menu)
         self.app_toolbar.addWidget(self.recent_projects_button)
         self.update_recent_projects_menu()
+
+        self.theme_button = QToolButton(self)
+        self.theme_button.setText("Theme")
+        self.theme_button.setToolTip("Choose the application color theme")
+        self.theme_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.theme_menu = QMenu(self.theme_button)
+        self.light_theme_action = QAction("Light", self.theme_menu, checkable=True)
+        self.dark_theme_action = QAction("Dark", self.theme_menu, checkable=True)
+        self.light_theme_action.triggered.connect(lambda: self.set_theme("light"))
+        self.dark_theme_action.triggered.connect(lambda: self.set_theme("dark"))
+        self.theme_menu.addAction(self.light_theme_action)
+        self.theme_menu.addAction(self.dark_theme_action)
+        self.theme_button.setMenu(self.theme_menu)
+        self.app_toolbar.addWidget(self.theme_button)
         
         # Central Widget
         central_widget = QWidget()
@@ -172,15 +192,59 @@ class MainWindow(QMainWindow):
         
         plot_widget = QWidget()
         plot_widget.setLayout(plot_layout)
-        
-        splitter.addWidget(self.control_panel)
+
+        sidebar = QWidget()
+        sidebar.setObjectName("projectSidebar")
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(14, 16, 14, 14)
+        sidebar_layout.setSpacing(10)
+        heading = QLabel("Point Cloud Evaluation")
+        heading.setObjectName("sidebarHeading")
+        heading.setWordWrap(True)
+        hint = QLabel("Open a project or load point cloud data to begin. Select a dataset to see its tools.")
+        hint.setObjectName("sidebarHint")
+        hint.setWordWrap(True)
+        sidebar_layout.addWidget(heading)
+        sidebar_layout.addWidget(hint)
+        self.sidebar_open_project_button = QPushButton("Open project")
+        self.sidebar_open_project_button.clicked.connect(self.open_project_dialog)
+        self.sidebar_open_data_button = QPushButton("Load point cloud")
+        self.sidebar_open_data_button.setObjectName("primaryAction")
+        self.sidebar_open_data_button.clicked.connect(self.open_file_dialog)
+        sidebar_layout.addWidget(self.sidebar_open_project_button)
+        sidebar_layout.addWidget(self.sidebar_open_data_button)
+        sidebar_layout.addWidget(self.control_panel.take_dataset_browser(), 1)
+
+        splitter.addWidget(sidebar)
         splitter.addWidget(plot_widget)
+        splitter.addWidget(self.control_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([270, 790, 430])
         
         layout.addWidget(splitter)
         
         central_widget.setLayout(layout)
+        self.set_theme(self.theme, persist=False)
+
+    def set_theme(self, theme: str, persist: bool = True):
+        """Apply and optionally persist the selected light or dark application theme."""
+        if theme not in {"light", "dark"}:
+            raise ValueError("Theme must be 'light' or 'dark'.")
+        self.theme = theme
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, theme)
+        if hasattr(self, "plot_canvas"):
+            self.plot_canvas.set_theme(theme)
+        if hasattr(self, "light_theme_action"):
+            self.light_theme_action.setChecked(theme == "light")
+            self.dark_theme_action.setChecked(theme == "dark")
+        if persist:
+            settings = load_app_settings()
+            settings["theme"] = theme
+            save_app_settings(settings)
 
     def set_project_dirty(self, dirty: bool = True):
         """Track project-owned changes and expose them in the window title."""

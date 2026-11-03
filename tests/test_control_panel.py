@@ -17,7 +17,11 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         panel = ControlPanel()
         self.assertEqual(
             [panel.tabs.tabText(index) for index in range(panel.tabs.count())],
-            ["Data & Display", "Filtering", "Manual Transform", "Legacy Alignment", "Fine Align & Error", "Export"],
+            ["Data", "Prepare", "Align", "Evaluate", "Export"],
+        )
+        self.assertEqual(
+            [panel.alignment_tabs.tabText(index) for index in range(panel.alignment_tabs.count())],
+            ["Manual transform", "Global alignment"],
         )
         panel.add_dataset_to_list("project")
         panel.add_dataset_to_list("reference")

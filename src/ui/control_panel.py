@@ -44,7 +44,8 @@ class ControlPanel(QWidget):
         layout = QVBoxLayout()
         
         # --- Global Dataset List ---
-        list_group = QGroupBox("Loaded Point Clouds")
+        list_group = QGroupBox("Project and datasets")
+        self.dataset_group = list_group
         list_layout = QVBoxLayout()
         
         self.dataset_list = QListWidget()
@@ -52,7 +53,8 @@ class ControlPanel(QWidget):
         self.dataset_list.itemChanged.connect(self._on_item_changed)
         list_layout.addWidget(self.dataset_list)
         
-        btn_layout = QHBoxLayout()
+        btn_layout = QVBoxLayout()
+        load_buttons_layout = QHBoxLayout()
         self.btn_add = QPushButton("Add Data...")
         self.btn_add.clicked.connect(self.add_dataset_requested.emit)
         
@@ -70,11 +72,14 @@ class ControlPanel(QWidget):
         self.btn_move_down.setToolTip("Move the selected cloud later in the list. Later clouds are drawn underneath.")
         self.btn_move_down.clicked.connect(self._on_move_down_clicked)
         
-        btn_layout.addWidget(self.btn_add)
-        btn_layout.addWidget(self.btn_add_quick_ref)
+        load_buttons_layout.addWidget(self.btn_add)
+        load_buttons_layout.addWidget(self.btn_add_quick_ref)
+        btn_layout.addLayout(load_buttons_layout)
         btn_layout.addWidget(self.btn_remove)
-        btn_layout.addWidget(self.btn_move_up)
-        btn_layout.addWidget(self.btn_move_down)
+        order_buttons_layout = QHBoxLayout()
+        order_buttons_layout.addWidget(self.btn_move_up)
+        order_buttons_layout.addWidget(self.btn_move_down)
+        btn_layout.addLayout(order_buttons_layout)
         list_layout.addLayout(btn_layout)
         list_group.setLayout(list_layout)
         layout.addWidget(list_group)
@@ -871,11 +876,17 @@ class ControlPanel(QWidget):
             scroll.setWidget(widget)
             return scroll
         
-        self.tabs.addTab(tab_data, "Data & Display")
-        self.tabs.addTab(tab_filter, "Filtering")
-        self.tabs.addTab(scrollable_tab(tab_manual_transform), "Manual Transform")
-        self.tabs.addTab(scrollable_tab(tab_legacy_alignment), "Legacy Alignment")
-        self.tabs.addTab(scrollable_tab(tab_fine_alignment), "Fine Align & Error")
+        self.tabs.addTab(tab_data, "Data")
+        self.tabs.addTab(scrollable_tab(tab_filter), "Prepare")
+
+        align_tab = QWidget()
+        align_layout = QVBoxLayout(align_tab)
+        self.alignment_tabs = QTabWidget()
+        self.alignment_tabs.addTab(scrollable_tab(tab_manual_transform), "Manual transform")
+        self.alignment_tabs.addTab(scrollable_tab(tab_legacy_alignment), "Global alignment")
+        align_layout.addWidget(self.alignment_tabs)
+        self.tabs.addTab(align_tab, "Align")
+        self.tabs.addTab(scrollable_tab(tab_fine_alignment), "Evaluate")
         self.tabs.addTab(scrollable_tab(tab_export), "Export")
         
         layout.addWidget(self.tabs)
@@ -887,6 +898,14 @@ class ControlPanel(QWidget):
             self.btn_save_data, self.btn_centre_data, manual_group, icp_group, legacy_global_group, auto_group, comparison_group
         ]
         self._enable_selection_widgets(False)
+
+    def take_dataset_browser(self):
+        """Detach the project and dataset list so the main window can place it in its own sidebar."""
+        layout = self.layout()
+        if layout is not None:
+            layout.removeWidget(self.dataset_group)
+        self.dataset_group.setParent(None)
+        return self.dataset_group
         
     def _enable_selection_widgets(self, enable: bool):
         for w in self.requires_selection_widgets:

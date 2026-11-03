@@ -6,6 +6,9 @@ from src.ui.application_identity import application_icon, set_windows_app_id
 def main():
     set_windows_app_id()
     app = QApplication(sys.argv)
+    app.setOrganizationName("SPP2433")
+    app.setApplicationName("PointCloudEvaluation")
+    app.setApplicationDisplayName("Point Cloud Evaluation")
     app.setWindowIcon(application_icon())
     app.setStyle("Fusion")
     
