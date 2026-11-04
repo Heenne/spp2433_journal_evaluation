@@ -2,6 +2,20 @@
 
 This guide takes a first-time user from point-cloud files to a saved comparison. Interface labels below use their English names; switch the app language with **EN / DE** if needed.
 
+## Workflow at a glance
+
+```mermaid
+flowchart LR
+    A[Add reference and measurement] --> B[Check units and rough placement]
+    B --> C[Align the measurement]
+    C --> D[Choose source and reference]
+    D --> E[Calculate and inspect surface error]
+    E --> F[Save the project]
+    F --> G[Export point clouds or figures]
+```
+
+The reference stays fixed during alignment. The selected measurement is moved into place, then evaluated against the reference.
+
 ## 1. Prepare the files
 
 The app reads comma-separated `.csv` files and binary `.ply` point clouds. Both need three numeric coordinates named `X`, `Y`, and `Z` (the names are case-insensitive). CSV files need a header row. Extra columns are retained and can be used for colour mapping. Make sure the coordinates are finite and understand each file's units before alignment.

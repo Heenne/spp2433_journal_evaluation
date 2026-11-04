@@ -1,6 +1,14 @@
-# SPP 2433 – Point Cloud Evaluation
+<p align="center">
+  <img src="src/assets/brand_logo.svg" alt="SPP 2433 logo" width="112">
+</p>
 
-A Windows desktop app for loading, aligning, comparing, and exporting 3-D point clouds.
+<h1 align="center">SPP 2433 — Point Cloud Evaluation</h1>
+<p align="center">Load, align, compare, and export 3-D point clouds.</p>
+
+<p align="center">
+  <img src="docs/images/app-screenshot.png" alt="SPP 2433 Point Cloud Evaluation displaying a loaded 3-D point cloud" width="100%">
+</p>
+<p align="center"><em>The application with a loaded example point cloud.</em></p>
 
 ## Quick start
 
