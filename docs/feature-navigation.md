@@ -1,22 +1,17 @@
-# Feature navigation parity
+# Feature navigation
 
-The workspace keeps the 3-D plot visible while the right-hand tool section changes. The project and dataset list remains visible on the left.
+The plot stays visible in the centre while the selected cloud list remains on the left and tool tabs remain on the right.
 
-| Existing capability | Workspace location |
+| Where | What is there |
 | --- | --- |
-| Open a project, load CSV/PLY data, TXT conversion, pixel-to-mm conversion, quick reference, save/recent projects | Top toolbar and left project sidebar |
-| Dataset selection, visibility, remove, and display order | Left **Project and datasets** panel |
-| Base colour, column colour mapping, pointwise error-map display, camera views and angles | **Data** |
-| Stride/random sampling, voxel, Z-score, SOR, bounding box, cache/save filtered data, centre copy | **Prepare** |
-| Axis inversion, scale, translation, rotation, presets, ICP | **Align → Manual transform** |
-| Previous centre-of-gravity/PCA/FPFH workflow | **Align → Global alignment** |
-| Bounded fine alignment, source/reference selection, surface-error calculation, report, heatmap controls | **Evaluate** |
-| Preview, appearance, display/full-resolution export, import/export settings | **Export** |
-| Light/dark theme | Top toolbar **Theme** menu; saved in the per-user application settings |
+| Top toolbar | Open project and recent projects, add point cloud, save/save as, point-cloud export, TXT-to-CSV conversion, theme, and language. |
+| Left **Point Clouds** list | Select the cloud whose settings to edit, toggle plot visibility, and change draw order. Right-click a cloud to export filtered data or create a centred copy. |
+| **Data** | Cloud colour, additional-column colour mapping, error-map display, and camera orientation. |
+| **Preview Plot** | Live plot appearance settings that are saved with the project. |
+| **Filter** | Voxel display/export downsampling, Z-score, SOR, and Z bounds. |
+| **Manual Align** | Axis convention, scale, translation, rotation, and transform presets for the selected cloud. |
+| **Auto Align** | Bounded fine alignment, legacy Standard/Robust ICP, or global PCA/FPFH alignment. The source and reference selectors are in the alignment tools. |
+| **Evaluate** | Select source/reference, calculate unsigned or signed surface error, inspect coverage and statistics, and configure the error map. |
+| **Export** | Named export profiles, export appearance, preview, and plot export actions. |
 
-## Compatibility checklist
-
-- Existing JSON projects and saved camera/error-report state continue to use the existing project loader and saver.
-- CSV and PLY input, TXT conversion, and pixel-coordinate conversion remain attached to the same actions.
-- Transform presets, all manual/global alignment methods, filters, error reports/maps, and export settings remain in the existing `ControlPanel` handlers.
-- The UI navigation only changes where these controls appear; it does not change point-cloud transformations, project schemas, or export formats.
+For the full user workflow, see the [user guide](user-guide.md). For what the calculations mean, see [algorithms and result metrics](algorithms.md).
