@@ -13,7 +13,7 @@
 ## Quick start
 
 1. Download the latest `PointCloudEvaluation-*.exe` from [GitHub Releases](https://github.com/Heenne/spp2433_journal_evaluation/releases/latest).
-2. Start the EXE. Python and Pixi are not needed.
+2. Start the EXE.
 3. Choose **Open project** to continue a saved analysis, or **Add point cloud** to load a comma-separated CSV or binary PLY. CSV files need `X`, `Y`, and `Z` columns.
 4. Add the reference and measurement clouds, align them, then calculate surface error. Save the project to keep settings and results.
 
