@@ -8,7 +8,7 @@
 <p align="center">
   <img src="docs/images/app-screenshot.png" alt="SPP 2433 Point Cloud Evaluation displaying a loaded 3-D point cloud" width="100%">
 </p>
-<p align="center"><em>The A3 project displaying a point cloud from the A4 folder.</em></p>
+<p align="center"><em>The A3 project's A4 point cloud with its calculated signed surface-deviation map.</em></p>
 
 ## Quick start
 
