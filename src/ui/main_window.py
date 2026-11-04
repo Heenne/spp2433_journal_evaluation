@@ -1,20 +1,21 @@
 import os
+from copy import deepcopy
 import pandas as pd
 import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
     QMessageBox, QMenu, QApplication, QProgressBar, QPushButton, QSplitter,
-    QToolBar, QToolButton, QStyle, QDialog, QLabel, QDialogButtonBox,
+    QToolBar, QToolButton, QDialog, QLabel, QDialogButtonBox,
     QFormLayout, QDoubleSpinBox, QCheckBox, QSizePolicy
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QPixmap
+from PyQt6.QtCore import Qt, QSize, QRect, QTimer
+from PyQt6.QtGui import QAction, QPixmap, QCursor, QGuiApplication
 from src.ui.plot_canvas import PlotCanvas
 from src.ui.control_panel import ControlPanel
 from src.data.parser import parse_point_cloud_file
 from src.data.filter import (
     check_cached_filtered_files, 
-    save_filtered_data, load_filter_config, save_filter_config,
+    save_filtered_data, load_filter_config,
     filter_by_zscore, filter_by_bounding_box, filter_by_sor, filter_by_voxel_grid
 )
 from src.data.centering import centre_point_cloud, save_centred_point_cloud
@@ -28,6 +29,8 @@ from src.utils.error_mapping import error_map_colours
 from src.utils.error_report import update_report_metrics, interval, number
 from src.ui.error_report_dialog import ErrorReportDialog
 from src.ui.application_identity import application_icon
+from src.ui.icons import monochrome_icon
+from src.ui.i18n import apply_language
 from src.ui.theme import apply_theme
 from src.utils.app_settings import load_app_settings, save_app_settings
 from src.utils.export_layout import layout_export_z_axis
@@ -38,6 +41,33 @@ from matplotlib.colors import LinearSegmentedColormap
 class PointCloudNavigationToolbar(NavigationToolbar):
     """Make the standard Home button fit all plotted point-cloud data."""
 
+    def __init__(self, canvas, parent=None):
+        super().__init__(canvas, parent)
+        # Matplotlib's Customize editor is intended for ordinary axes and curves.
+        # It has no useful role in this point-cloud viewer and causes a toolbar
+        # overflow button when the viewer is narrow.
+        customize_action = getattr(self, "_actions", {}).get("edit_parameters")
+        if customize_action is not None:
+            self.removeAction(customize_action)
+
+    def set_icon_color(self, color: str):
+        """Use the same monochrome outline set as the rest of the app."""
+        icons = {
+            "home": "home",
+            "back": "back",
+            "forward": "forward",
+            "pan": "pan",
+            "zoom": "zoom",
+            "configure subplots": "subplots",
+            "save": "save",
+        }
+        for action in self.actions():
+            label = f"{action.text()} {action.toolTip()}".lower()
+            for key, icon_name in icons.items():
+                if key in label:
+                    action.setIcon(monochrome_icon(icon_name, color))
+                    break
+
     def home(self, *args):
         self.canvas.reset_view_to_data()
         self.push_current()
@@ -45,28 +75,60 @@ class PointCloudNavigationToolbar(NavigationToolbar):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("3D Point Cloud Data Viewer")
+        self.setWindowTitle("SPP 2433 - Point Cloud Evaluation")
         self.setWindowIcon(application_icon())
-        self.resize(1500, 900)
-        self.setMinimumSize(1050, 700)
         self.theme = load_app_settings().get("theme", "light")
         if self.theme not in {"light", "dark"}:
             self.theme = "light"
+        self.language = load_app_settings().get("language", "en")
+        if self.language not in {"en", "de"}:
+            self.language = "en"
         
         self.datasets = []
         self.project_filepath = None
         self.project_dirty = False
         
         self.init_ui()
+        self._place_initial_window()
+
+    @staticmethod
+    def _initial_geometry(available: QRect) -> QRect:
+        """Size and centre a normal window inside the screen's usable area."""
+        minimum_width = min(1050, max(1, available.width() - 32))
+        minimum_height = min(700, max(1, available.height() - 32))
+        width = max(minimum_width, min(1500, round(available.width() * 0.9)))
+        height = max(minimum_height, min(900, round(available.height() * 0.9)))
+        return QRect(
+            available.x() + (available.width() - width) // 2,
+            available.y() + (available.height() - height) // 2,
+            width,
+            height,
+        )
+
+    def _place_initial_window(self):
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.setMinimumSize(1050, 700)
+            self.resize(1280, 800)
+            return
+        available = screen.availableGeometry()
+        geometry = self._initial_geometry(available)
+        self.setMinimumSize(
+            min(1050, max(1, available.width() - 32)),
+            min(700, max(1, available.height() - 32)),
+        )
+        self.setGeometry(geometry)
         
     def init_ui(self):
-        # Project actions and appearance controls occupy distinct ends of the top bar.
         self.menuBar().hide()
         self.app_toolbar = QToolBar("Project", self)
         self.app_toolbar.setObjectName("projectToolbar")
         self.app_toolbar.setMovable(False)
+        self.app_toolbar.setFloatable(False)
         self.app_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.app_toolbar.setIconSize(QSize(20, 20))
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.app_toolbar)
+        self._icon_color = "#526174" if self.theme == "light" else "#d3dbe7"
 
         def toolbar_action(icon, text, callback, shortcut=None, add=True):
             action = QAction(icon, text, self)
@@ -79,51 +141,126 @@ class MainWindow(QMainWindow):
                 self.app_toolbar.addAction(action)
             return action
 
-        style = self.style()
         self.open_project_action = toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), "Open project", self.open_project_dialog,
+            monochrome_icon("folder", self._icon_color), "Open project", self.open_project_dialog,
             "Ctrl+Shift+O", add=False,
         )
         self.open_project_button = QToolButton(self)
         self.open_project_button.setObjectName("openProjectButton")
         self.open_project_button.setDefaultAction(self.open_project_action)
         self.open_project_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.open_project_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.open_project_button.setToolTip("Open project")
         self.recent_projects_menu = QMenu(self.open_project_button)
-        self.open_project_button.setMenu(self.recent_projects_menu)
-        self.app_toolbar.addWidget(self.open_project_button)
+        self.recent_projects_button = QToolButton(self)
+        self.recent_projects_button.setObjectName("recentProjectsButton")
+        self.recent_projects_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
+        self.recent_projects_button.setIconSize(self.open_project_button.iconSize())
+        self.recent_projects_button.setFixedSize(42, 38)
+        self.recent_projects_button.setToolTip("Recent projects")
+        self.recent_projects_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.recent_projects_button.setMenu(self.recent_projects_menu)
+        self.project_split_control = QWidget(self)
+        self.project_split_control.setObjectName("projectSplitControl")
+        project_split_layout = QHBoxLayout(self.project_split_control)
+        project_split_layout.setContentsMargins(0, 0, 0, 0)
+        project_split_layout.setSpacing(0)
+        self.open_project_button.setFixedHeight(38)
+        project_split_layout.addWidget(self.open_project_button)
+        project_split_layout.addWidget(self.recent_projects_button)
+        self.app_toolbar.addWidget(self.project_split_control)
         self.update_recent_projects_menu()
 
         self.open_data_action = toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "Add point cloud", self.open_file_dialog,
-            "Ctrl+O",
+            monochrome_icon("cloud", self._icon_color), "Add point cloud", self.open_file_dialog,
+            "Ctrl+O", add=False,
         )
-        self.app_toolbar.addSeparator()
+        self.open_data_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.addAction(self.open_data_action)
         self.save_project_action = toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Save", self.save_project,
+            monochrome_icon("save", self._icon_color), "Save", self.save_project,
             "Ctrl+S",
         )
         self.save_as_project_action = toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder), "Save as",
+            monochrome_icon("save_as", self._icon_color), "Save as",
             self.save_project_as_dialog, "Ctrl+Shift+S",
         )
+        self.export_menu = QMenu(self)
+        self.export_filtered_action = QAction("Export filtered", self)
+        self.export_filtered_action.triggered.connect(self.save_filtered_dataset)
+        self.export_centered_action = QAction("Export centered", self)
+        self.export_centered_action.triggered.connect(self.create_centred_copy)
+        self.export_menu.addAction(self.export_filtered_action)
+        self.export_menu.addAction(self.export_centered_action)
+        self.export_button = QToolButton(self)
+        self.export_button.setObjectName("toolbarExportButton")
+        self.export_button.setText("Export Point Cloud")
+        self.export_button.setToolTip("Export Point Cloud")
+        self.export_button.setIcon(monochrome_icon("export", self._icon_color))
+        self.export_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.export_menu_button = QToolButton(self)
+        self.export_menu_button.setObjectName("exportMenuButton")
+        self.export_menu_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
+        self.export_menu_button.setIconSize(self.open_project_button.iconSize())
+        self.export_menu_button.setFixedSize(42, 38)
+        self.export_menu_button.setToolTip("Export options")
+        self.export_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.export_menu_button.setMenu(self.export_menu)
+        self.export_split_control = QWidget(self)
+        self.export_split_control.setObjectName("exportSplitControl")
+        export_split_layout = QHBoxLayout(self.export_split_control)
+        export_split_layout.setContentsMargins(0, 0, 0, 0)
+        export_split_layout.setSpacing(0)
+        self.export_button.setFixedHeight(38)
+        export_split_layout.addWidget(self.export_button)
+        export_split_layout.addWidget(self.export_menu_button)
+        self.app_toolbar.addWidget(self.export_split_control)
         self.app_toolbar.addSeparator()
-        toolbar_action(
-            style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "TXT to CSV", self.open_convert_dialog
+        self.convert_action = toolbar_action(
+            monochrome_icon("convert", self._icon_color), "TXT to CSV", self.open_convert_dialog
         )
 
         spacer = QWidget(self)
+        spacer.setObjectName("toolbarSpacer")
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.app_toolbar.addWidget(spacer)
         self.light_theme_action = QAction("Light", self, checkable=True)
         self.dark_theme_action = QAction("Dark", self, checkable=True)
+        self.light_theme_action.setToolTip("Light theme")
+        self.dark_theme_action.setToolTip("Dark theme")
         self.light_theme_action.triggered.connect(lambda: self.set_theme("light"))
         self.dark_theme_action.triggered.connect(lambda: self.set_theme("dark"))
+        choices = QWidget(self)
+        choices.setObjectName("toolbarChoices")
+        choices_layout = QHBoxLayout(choices)
+        choices_layout.setContentsMargins(0, 0, 0, 0)
+        choices_layout.setSpacing(2)
         for action in (self.light_theme_action, self.dark_theme_action):
             button = QToolButton(self)
             button.setObjectName("themeChoice")
             button.setDefaultAction(action)
-            self.app_toolbar.addWidget(button)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            button.setIconSize(self.open_project_button.iconSize())
+            button.setFixedSize(38, 38)
+            choices_layout.addWidget(button)
+        choices_layout.addSpacing(5)
+        choices_separator = QWidget(choices)
+        choices_separator.setObjectName("themeLanguageSeparator")
+        choices_separator.setFixedSize(1, 22)
+        choices_layout.addWidget(choices_separator)
+        choices_layout.addSpacing(5)
+        self.language_actions = {}
+        for code in ("DE", "EN"):
+            action = QAction(code, self, checkable=True)
+            action.setToolTip("English" if code == "EN" else "Deutsch")
+            action.triggered.connect(lambda checked, language=code.lower(): self.set_language(language))
+            button = QToolButton(self)
+            button.setObjectName("languageChoice")
+            button.setDefaultAction(action)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setFixedSize(38, 38)
+            choices_layout.addWidget(button)
+            self.language_actions[code.lower()] = action
+        self.app_toolbar.addWidget(choices)
         
         # Central Widget
         central_widget = QWidget()
@@ -145,11 +282,12 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("workspaceSplitter")
+        splitter.setHandleWidth(6)
         
         # Control Panel
         self.control_panel = ControlPanel()
         self.control_panel.add_dataset_requested.connect(self.open_file_dialog)
-        self.control_panel.add_quick_ref_requested.connect(self.add_quick_reference)
         self.control_panel.remove_dataset_requested.connect(self.remove_dataset)
         self.control_panel.move_dataset_requested.connect(self.move_dataset)
         self.control_panel.selection_changed.connect(self.on_selection_changed)
@@ -159,8 +297,8 @@ class MainWindow(QMainWindow):
         self.control_panel.export_full_resolution_requested.connect(self.export_full_resolution_plot)
         self.control_panel.export_configured_requested.connect(self.export_configured_plot)
         self.control_panel.export_preview_requested.connect(self.preview_export_settings)
-        self.control_panel.save_data_requested.connect(self.save_filtered_dataset)
-        self.control_panel.centre_data_requested.connect(self.create_centred_copy)
+        self.control_panel.export_profiles_changed.connect(lambda: self.set_project_dirty(True))
+        self.control_panel.preview_plot_settings_changed.connect(self.on_preview_plot_settings_changed)
         self.control_panel.run_icp_requested.connect(self.on_run_icp)
         self.control_panel.run_legacy_global_alignment_requested.connect(self.on_run_legacy_global_alignment)
         self.control_panel.run_auto_alignment_requested.connect(self.on_run_auto_alignment)
@@ -174,7 +312,6 @@ class MainWindow(QMainWindow):
         self.control_panel.camera_view_requested.connect(self.on_camera_view_requested)
         self.control_panel.camera_rotate_requested.connect(self.on_camera_rotate_requested)
         self.control_panel.camera_angles_requested.connect(self.on_camera_angles_requested)
-        self.control_panel.camera_angles_read_requested.connect(self.on_camera_angles_read_requested)
         
         # Plot Canvas
         plot_widget = QWidget()
@@ -183,7 +320,16 @@ class MainWindow(QMainWindow):
         plot_layout.setContentsMargins(12, 10, 12, 12)
         plot_layout.setSpacing(8)
         self.plot_canvas = PlotCanvas(self)
+        self.plot_canvas.set_preview_options(self.control_panel.get_preview_plot_settings())
+        self._pending_preview_plot_settings = None
+        self._preview_plot_update_timer = QTimer(self)
+        self._preview_plot_update_timer.setSingleShot(True)
+        self._preview_plot_update_timer.setInterval(140)
+        self._preview_plot_update_timer.timeout.connect(self._apply_pending_preview_plot_settings)
+        self.plot_canvas.mpl_connect("motion_notify_event", self._sync_camera_angle_fields)
+        self.plot_canvas.mpl_connect("button_release_event", self._sync_camera_angle_fields)
         self.toolbar = PointCloudNavigationToolbar(self.plot_canvas, self)
+        self.toolbar.set_icon_color(self._icon_color)
         self.toolbar.setObjectName("viewerToolbar")
         viewer_title = QLabel("Point Viewer")
         viewer_title.setObjectName("sectionHeading")
@@ -202,46 +348,59 @@ class MainWindow(QMainWindow):
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(14, 16, 14, 14)
         sidebar_layout.setSpacing(10)
-        heading = QLabel("Point Cloud Evaluation")
-        heading.setObjectName("sidebarHeading")
-        heading.setWordWrap(True)
-        hint = QLabel("Open a project or load point cloud data to begin. Select a dataset to see its tools.")
-        hint.setObjectName("sidebarHint")
-        hint.setWordWrap(True)
-        sidebar_layout.addWidget(heading)
-        sidebar_layout.addWidget(hint)
-        self.sidebar_open_project_button = QPushButton("Open project")
-        self.sidebar_open_project_button.clicked.connect(self.open_project_dialog)
-        self.sidebar_open_data_button = QPushButton("Load point cloud")
-        self.sidebar_open_data_button.setObjectName("primaryAction")
-        self.sidebar_open_data_button.clicked.connect(self.open_file_dialog)
-        sidebar_layout.addWidget(self.sidebar_open_project_button)
-        sidebar_layout.addWidget(self.sidebar_open_data_button)
         sidebar_layout.addWidget(self.control_panel.take_dataset_browser(), 1)
+        sidebar_layout.addWidget(self.control_panel.take_camera_controls())
+        cloud_list = self.control_panel.dataset_list
+        cloud_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        cloud_list.customContextMenuRequested.connect(self.show_dataset_context_menu)
 
         splitter.addWidget(sidebar)
         splitter.addWidget(plot_widget)
+        self.control_panel.setMinimumWidth(410)
         splitter.addWidget(self.control_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
         splitter.setStretchFactor(2, 2)
-        splitter.setSizes([270, 790, 430])
+        splitter.setSizes([255, 660, 570])
+        self.workspace_splitter = splitter
         
         layout.addWidget(splitter)
         
         central_widget.setLayout(layout)
         self.set_theme(self.theme, persist=False)
+        self.control_panel.set_icon_color(self._icon_color)
+        self.set_language(self.language, persist=False)
 
     def set_theme(self, theme: str, persist: bool = True):
         """Apply and optionally persist the selected light or dark application theme."""
         if theme not in {"light", "dark"}:
             raise ValueError("Theme must be 'light' or 'dark'.")
         self.theme = theme
+        self._icon_color = "#526174" if theme == "light" else "#d3dbe7"
+        if hasattr(self, "toolbar"):
+            self.toolbar.set_icon_color(self._icon_color)
+        if hasattr(self, "control_panel"):
+            self.control_panel.set_icon_color(self._icon_color)
+        if hasattr(self, "open_project_action"):
+            self.open_project_action.setIcon(monochrome_icon("folder", self._icon_color))
+            self.open_data_action.setIcon(monochrome_icon("cloud", self._icon_color))
+            self.save_project_action.setIcon(monochrome_icon("save", self._icon_color))
+            self.save_as_project_action.setIcon(monochrome_icon("save_as", self._icon_color))
+            self.recent_projects_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
+            self.light_theme_action.setIcon(monochrome_icon("sun", self._icon_color))
+            self.dark_theme_action.setIcon(monochrome_icon("moon", self._icon_color))
+            self.convert_action.setIcon(monochrome_icon("convert", self._icon_color))
+            self.export_button.setIcon(monochrome_icon("export", self._icon_color))
+            self.export_menu_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
+            for action, icon_name in (
+                (self.export_filtered_action, "cloud"),
+                (self.export_centered_action, "cloud"),
+            ):
+                action.setIcon(monochrome_icon(icon_name, self._icon_color))
         app = QApplication.instance()
         if app is not None:
             apply_theme(app, theme)
         if hasattr(self, "plot_canvas"):
-        self.control_panel.setMaximumWidth(480)
             self.plot_canvas.set_theme(theme)
         if hasattr(self, "light_theme_action"):
             self.light_theme_action.setChecked(theme == "light")
@@ -251,12 +410,39 @@ class MainWindow(QMainWindow):
             settings["theme"] = theme
             save_app_settings(settings)
 
+    def set_language(self, language: str, persist: bool = True):
+        """Switch the application navigation and primary controls between English and German."""
+        if language not in {"en", "de"}:
+            raise ValueError("Language must be 'en' or 'de'.")
+        self.language = language
+        apply_language(self, language)
+        if hasattr(self, "control_panel"):
+            self.control_panel.set_language(language)
+        for code, action in self.language_actions.items():
+            action.setChecked(code == language)
+        app = QApplication.instance()
+        if app is not None:
+            app.setApplicationDisplayName(self._app_name())
+        suffix = os.path.basename(self.project_filepath) if self.project_filepath else ""
+        marker = " *" if self.project_dirty else ""
+        project_part = f" — {suffix}" if suffix else ""
+        self.setWindowTitle(f"{self._app_name()}{project_part}{marker}")
+        if persist:
+            settings = load_app_settings()
+            settings["language"] = language
+            save_app_settings(settings)
+
+    def _app_name(self) -> str:
+        return "SPP 2433 - Punktwolkenauswertung" if self.language == "de" else "SPP 2433 - Point Cloud Evaluation"
+
     def set_project_dirty(self, dirty: bool = True):
         """Track project-owned changes and expose them in the window title."""
         self.project_dirty = bool(dirty)
-        suffix = os.path.basename(self.project_filepath) if self.project_filepath else "Untitled project"
+        suffix = os.path.basename(self.project_filepath) if self.project_filepath else (
+            "Unbenanntes Projekt" if self.language == "de" else "Untitled project"
+        )
         marker = " *" if self.project_dirty else ""
-        self.setWindowTitle(f"3D Point Cloud Data Viewer — {suffix}{marker}")
+        self.setWindowTitle(f"{self._app_name()} — {suffix}{marker}")
         
     def set_loading_state(self, is_loading: bool, message: str = ""):
         from PyQt6.QtCore import Qt
@@ -442,6 +628,7 @@ class MainWindow(QMainWindow):
                     normalized_entries.append({
                         "filepath": entry["filepath"],
                         "visible": bool(entry.get("visible", True)),
+                        "settings": entry.get("settings") if isinstance(entry.get("settings"), dict) else None,
                         "last_comparison": entry.get("last_comparison"),
                         "surface_error_settings": entry.get("surface_error_settings"),
                     })
@@ -457,12 +644,20 @@ class MainWindow(QMainWindow):
             self._pending_project_comparisons = normalized_entries
             self._pending_surface_error_source = data.get("surface_error_source_filepath")
             self._restore_project_camera_after_final_load = False
+            self.control_panel.load_export_profiles(data.get("export_profiles"))
+            self.control_panel.load_preview_plot_settings(data.get("preview_plot_settings"))
+            self.plot_canvas.set_preview_options(self.control_panel.get_preview_plot_settings())
             
             # Load all files in the project
             for entry in normalized_entries:
                 fp = entry["filepath"]
                 if os.path.exists(fp):
-                    self.load_file(fp, visible=entry["visible"], mark_project_dirty=False)
+                    self.load_file(
+                        fp,
+                        visible=entry["visible"],
+                        mark_project_dirty=False,
+                        settings=entry.get("settings"),
+                    )
                 else:
                     QMessageBox.warning(self, "Missing File", f"Could not find dataset file:\n{fp}")
 
@@ -489,7 +684,9 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "control_panel", None)
         source_idx = panel.comparison_source_combo.currentIndex() if panel is not None else -1
         return {
-            "format_version": 3,
+            "format_version": 4,
+            "export_profiles": panel.export_profiles_data() if panel is not None else {},
+            "preview_plot_settings": panel.get_preview_plot_settings() if panel is not None else {},
             **({"surface_error_source_filepath": self.datasets[source_idx]["filepath"]}
                if 0 <= source_idx < len(self.datasets) else {}),
             "camera_view": {
@@ -501,6 +698,7 @@ class MainWindow(QMainWindow):
                 {
                     "filepath": dataset["filepath"],
                     "visible": bool(dataset.get("visible", True)),
+                    "settings": deepcopy(dataset.get("settings", {})),
                     **({"last_comparison": dataset["last_comparison"]}
                        if isinstance(dataset.get("last_comparison"), dict) else {}),
                     **({"surface_error_settings": dataset["surface_error_settings"]}
@@ -618,13 +816,15 @@ class MainWindow(QMainWindow):
     def save_project_dialog(self):
         return self.save_project_as_dialog()
             
-    def load_file(self, filepath: str, visible: bool = True, mark_project_dirty: bool = True):
+    def load_file(self, filepath: str, visible: bool = True, mark_project_dirty: bool = True,
+                  settings: dict | None = None):
         if not hasattr(self, 'load_queue'):
             self.load_queue = []
         self.load_queue.append({
             "filepath": filepath,
             "visible": bool(visible),
             "mark_project_dirty": bool(mark_project_dirty),
+            "settings": deepcopy(settings) if isinstance(settings, dict) else None,
         })
         self.process_load_queue()
 
@@ -653,7 +853,11 @@ class MainWindow(QMainWindow):
                 
             name = os.path.basename(filepath)
             
-            config = load_filter_config(filepath)
+            # New projects carry settings inline. Sidecar configs are read only
+            # as a compatibility fallback for older projects and loose files.
+            config = load_request.get("settings")
+            if config is None:
+                config = load_filter_config(filepath)
             if not config:
                 cycle_colors = ["C0", "C1", "C2", "C3", "C4", "C5"]
                 idx = len(self.datasets) % len(cycle_colors)
@@ -855,7 +1059,6 @@ class MainWindow(QMainWindow):
                 dataset.pop("last_comparison", None)
             st = self.control_panel.get_current_settings()
             self.datasets[idx]["settings"] = st
-            save_filter_config(self.datasets[idx]["filepath"], st)
             self.set_project_dirty(True)
             self.control_panel.set_error_map_display_state(False)
             self._show_saved_comparison_for_source()
@@ -946,7 +1149,10 @@ class MainWindow(QMainWindow):
         self.control_panel.set_camera_angles(*self.plot_canvas.camera_angles())
         self.set_project_dirty(True)
 
-    def on_camera_angles_read_requested(self):
+    def _sync_camera_angle_fields(self, event=None):
+        """Reflect direct mouse rotation in the camera controls while the user drags."""
+        if event is not None and (event.inaxes is not self.plot_canvas.axes or event.button is None):
+            return
         self.control_panel.set_camera_angles(*self.plot_canvas.camera_angles())
             
     def apply_transform(self, df: pd.DataFrame, settings: dict) -> pd.DataFrame:
@@ -1023,7 +1229,7 @@ class MainWindow(QMainWindow):
                 if df_filtered is not None:
                     if not unchanged:
                         d["df_filtered"] = df_filtered
-                        d["last_settings"] = copy.deepcopy(d["settings"])
+                        d["last_settings"] = deepcopy(d["settings"])
                     
             self.plot_canvas.plot_datasets(self.datasets)
             if getattr(self, "_restore_project_camera_after_final_load", False):
@@ -1040,6 +1246,17 @@ class MainWindow(QMainWindow):
         self.update_worker.finished.connect(on_finished)
         self.update_worker.error.connect(on_error)
         self.update_worker.start()
+
+    def on_preview_plot_settings_changed(self, options: dict):
+        """Debounce visual edits, then redraw the interactive preview."""
+        self._pending_preview_plot_settings = options
+        self.set_project_dirty(True)
+        self._preview_plot_update_timer.start()
+
+    def _apply_pending_preview_plot_settings(self):
+        options, self._pending_preview_plot_settings = self._pending_preview_plot_settings, None
+        if options is not None:
+            self.plot_canvas.set_preview_options(options)
 
     def run_icp_background(self, source_dataset, target_dataset, max_corr_dist, method, progress_callback=None, is_cancelled_callback=None):
         if progress_callback:
@@ -1137,7 +1354,6 @@ class MainWindow(QMainWindow):
             dataset.pop("error_visualization", None)
             dataset.pop("show_error_visualization", None)
             dataset.pop("last_comparison", None)
-        save_filter_config(source_dataset["filepath"], st)
         self.set_project_dirty(True)
         if self.control_panel.dataset_list.currentRow() == source_idx:
             self.control_panel.apply_config(st)
@@ -1557,7 +1773,6 @@ class MainWindow(QMainWindow):
                 st["ry"] = fry
                 st["rz"] = frz
                 
-                save_filter_config(s_dataset["filepath"], st)
                 self.set_project_dirty(True)
                 
                 if self.control_panel.dataset_list.currentRow() == source_idx:
@@ -1968,6 +2183,13 @@ class MainWindow(QMainWindow):
             completion_title="Export Complete",
         )
 
+    def request_plot_export(self, full_resolution: bool):
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export Plot", "", "PNG Image (*.png);;JPEG Image (*.jpg);;SVG Vector (*.svg)"
+        )
+        if filepath:
+            self.export_configured_plot(filepath, full_resolution)
+
     def preview_export_settings(self):
         """Render the configured appearance at display density for quick iteration."""
         import tempfile
@@ -2058,6 +2280,24 @@ class MainWindow(QMainWindow):
         self.save_worker.finished.connect(on_finished)
         self.save_worker.error.connect(on_error)
         self.save_worker.start()
+
+    def show_dataset_context_menu(self, point):
+        cloud_list = self.control_panel.dataset_list
+        item = cloud_list.itemAt(point)
+        if item is None:
+            return
+        cloud_list.setCurrentItem(item)
+        menu = QMenu(cloud_list)
+        centre_action = menu.addAction(monochrome_icon("cloud", self._icon_color), "Create Centred Copy")
+        export_action = menu.addAction(monochrome_icon("export", self._icon_color), "Export Filtered Point Cloud")
+        if self.language == "de":
+            centre_action.setText("Zentrierte Kopie erstellen")
+            export_action.setText("Gefilterte Punktwolke exportieren")
+        selected = menu.exec(cloud_list.mapToGlobal(point))
+        if selected is centre_action:
+            self.create_centred_copy()
+        elif selected is export_action:
+            self.save_filtered_dataset()
 
     def create_centred_copy(self):
         """Save a translated copy of the selected source cloud without altering it."""

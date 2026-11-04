@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 
 from src.ui.control_panel import ControlPanel
+from src.ui.i18n import apply_language
 
 
 class ManualFineAlignmentControlTests(unittest.TestCase):
@@ -17,26 +18,40 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
         panel = ControlPanel()
         self.assertEqual(
             [panel.tabs.tabText(index) for index in range(panel.tabs.count())],
-            ["Data", "Prepare", "Align", "Evaluate", "Export"],
+            ["Data", "Preview Plot", "Filter", "Manual Align", "Auto Align", "Evaluate", "Export"],
         )
         self.assertEqual(
-            [panel.alignment_tabs.tabText(index) for index in range(panel.alignment_tabs.count())],
-            ["Manual transform", "Global alignment"],
+            [panel.alignment_method_combo.itemText(index) for index in range(panel.alignment_method_combo.count())],
+            ["Bounded fine alignment", "Standard ICP", "Robust ICP (Partial Overlap)", "Global PCA / FPFH"],
         )
+        for index, expected_page in enumerate((0, 1, 1, 2)):
+            panel.alignment_method_combo.setCurrentIndex(index)
+            self.assertEqual(panel.method_pages.currentIndex(), expected_page)
         panel.add_dataset_to_list("project")
         panel.add_dataset_to_list("reference")
         panel.dataset_list.setCurrentRow(0)
         panel.legacy_global_target_combo.setCurrentIndex(1)
+        panel.auto_source_combo.setCurrentIndex(0)
         panel.auto_target_combo.setCurrentIndex(1)
+        panel.icp_target_combo.setCurrentIndex(1)
         received = []
         received_global = []
         panel.run_auto_alignment_requested.connect(lambda *values: received.append(values))
         panel.run_legacy_global_alignment_requested.connect(lambda *values: received_global.append(values))
+        received_icp = []
+        panel.run_icp_requested.connect(lambda *values: received_icp.append(values))
 
         panel._on_run_legacy_global_alignment_clicked()
         panel._on_run_auto_alignment_clicked()
+        panel.alignment_method_combo.setCurrentIndex(2)
+        panel._on_run_icp_clicked()
 
         self.assertEqual(received_global, [(0, 1, 30_000)])
+        self.assertEqual(received_icp, [(0, 1, 1.0, "Robust ICP (Partial Overlap)")])
+        apply_language(panel, "de")
+        self.assertEqual(panel.alignment_method_combo.currentText(), "Robustes ICP (teilweise Überlappung)")
+        panel._on_run_icp_clicked()
+        self.assertEqual(received_icp[-1], (0, 1, 1.0, "Robust ICP (Partial Overlap)"))
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0][:3], (0, 1, 30_000))
         self.assertEqual(received[0][3:], (10.0, 10.0, 10.0, 5.0, 5.0, 5.0))
@@ -136,6 +151,9 @@ class ManualFineAlignmentControlTests(unittest.TestCase):
 
     def test_camera_angle_controls_read_and_emit_explicit_orientation(self):
         panel = ControlPanel()
+        camera_layout = panel.camera_group.layout()
+        self.assertEqual(camera_layout.itemAtPosition(1, 2).widget().text(), "−Y")
+        self.assertEqual(camera_layout.itemAtPosition(1, 3).widget().text(), "+Y")
         panel.set_camera_angles(12.5, -34.0, 7.5)
         received = []
         panel.camera_angles_requested.connect(lambda *angles: received.append(angles))

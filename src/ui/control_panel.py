@@ -1,15 +1,18 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QSlider, QComboBox, 
     QCheckBox, QPushButton, QGroupBox, QHBoxLayout, QFileDialog, QListWidget, QListWidgetItem,
-    QDoubleSpinBox, QSpinBox, QTabWidget, QFormLayout, QInputDialog, QMessageBox, QScrollArea, QGridLayout,
-    QLineEdit, QTextEdit
+    QDoubleSpinBox, QSpinBox, QFormLayout, QInputDialog, QMessageBox, QScrollArea, QGridLayout,
+    QLineEdit, QTextEdit, QToolButton, QStackedWidget, QTabWidget, QSizePolicy, QButtonGroup
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QEvent, QTimer, pyqtSignal
+from src.ui.icons import monochrome_icon
+from copy import deepcopy
+import json
+import os
 
 class ControlPanel(QWidget):
     # Signals
     add_dataset_requested = pyqtSignal()
-    add_quick_ref_requested = pyqtSignal()
     remove_dataset_requested = pyqtSignal(int)
     move_dataset_requested = pyqtSignal(int, int)
     selection_changed = pyqtSignal(int)
@@ -19,8 +22,6 @@ class ControlPanel(QWidget):
     export_full_resolution_requested = pyqtSignal(str)
     export_configured_requested = pyqtSignal(str, bool)
     export_preview_requested = pyqtSignal()
-    save_data_requested = pyqtSignal()
-    centre_data_requested = pyqtSignal()
     run_icp_requested = pyqtSignal(int, int, float, str) # source_idx, target_idx, max_dist, method
     run_legacy_global_alignment_requested = pyqtSignal(int, int, int) # source, reference, registration points
     run_auto_alignment_requested = pyqtSignal(int, int, int, float, float, float, float, float, float) # source, reference, points, +/- Tx/Ty/Tz, +/- Rx/Ry/Rz
@@ -30,13 +31,16 @@ class ControlPanel(QWidget):
     error_map_max_changed = pyqtSignal(float)
     surface_error_settings_changed = pyqtSignal()
     comparison_report_requested = pyqtSignal()
+    export_profiles_changed = pyqtSignal()
+    preview_plot_settings_changed = pyqtSignal(dict)
     camera_view_requested = pyqtSignal(str)
     camera_rotate_requested = pyqtSignal(float)
     camera_angles_requested = pyqtSignal(float, float, float)
-    camera_angles_read_requested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("workspaceTools")
+        self.language = "en"
         self.current_saved_transforms = {"Initial": {"tx": 0.0, "ty": 0.0, "tz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0}}
         self.init_ui()
         
@@ -46,71 +50,74 @@ class ControlPanel(QWidget):
         layout.setSpacing(8)
         
         # --- Global Dataset List ---
-        list_group = QGroupBox("Project and datasets")
+        list_group = QGroupBox("Point Clouds")
+        list_group.setObjectName("datasetGroup")
         self.dataset_group = list_group
         list_layout = QVBoxLayout()
-        
+
+        self.dataset_actions = QWidget(list_group)
+        self.dataset_actions.setObjectName("datasetActions")
+        action_layout = QHBoxLayout(self.dataset_actions)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(5)
+        self.btn_add = QToolButton()
+        self.btn_add.setToolTip("Add point cloud")
+        self.btn_add.clicked.connect(self.add_dataset_requested.emit)
+        self.btn_remove = QToolButton()
+        self.btn_remove.setToolTip("Remove selected point cloud")
+        self.btn_remove.clicked.connect(self._on_remove_clicked)
+        self.btn_move_up = QToolButton()
+        self.btn_move_up.setToolTip("Move selected point cloud up")
+        self.btn_move_up.clicked.connect(self._on_move_up_clicked)
+        self.btn_move_down = QToolButton()
+        self.btn_move_down.setToolTip("Move selected point cloud down")
+        self.btn_move_down.clicked.connect(self._on_move_down_clicked)
+        for button in (self.btn_add, self.btn_remove, self.btn_move_up, self.btn_move_down):
+            button.setObjectName("datasetActionButton")
+            button.setIconSize(QSize(18, 18))
+            button.setFixedSize(34, 32)
+            action_layout.addWidget(button)
+        action_layout.addStretch(1)
+        list_layout.addWidget(self.dataset_actions)
+
         self.dataset_list = QListWidget()
+        self.dataset_list.setObjectName("datasetList")
+        self.dataset_list.setMinimumHeight(150)
+        self.dataset_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.dataset_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.dataset_list.setWordWrap(False)
         self.dataset_list.itemSelectionChanged.connect(self._on_selection_changed)
         self.dataset_list.itemChanged.connect(self._on_item_changed)
-        list_layout.addWidget(self.dataset_list)
-        
-        btn_layout = QVBoxLayout()
-        load_buttons_layout = QHBoxLayout()
-        self.btn_add = QPushButton("Add Data...")
-        self.btn_add.clicked.connect(self.add_dataset_requested.emit)
-        
-        self.btn_add_quick_ref = QPushButton("Add Quick Ref")
-        self.btn_add_quick_ref.clicked.connect(self.add_quick_ref_requested.emit)
-        
-        self.btn_remove = QPushButton("Remove Selected")
-        self.btn_remove.clicked.connect(self._on_remove_clicked)
-
-        self.btn_move_up = QPushButton("Move Up")
-        self.btn_move_up.setToolTip("Move the selected cloud earlier in the list. Earlier clouds are drawn on top.")
-        self.btn_move_up.clicked.connect(self._on_move_up_clicked)
-
-        self.btn_move_down = QPushButton("Move Down")
-        self.btn_move_down.setToolTip("Move the selected cloud later in the list. Later clouds are drawn underneath.")
-        self.btn_move_down.clicked.connect(self._on_move_down_clicked)
-        
-        load_buttons_layout.addWidget(self.btn_add)
-        load_buttons_layout.addWidget(self.btn_add_quick_ref)
-        btn_layout.addLayout(load_buttons_layout)
-        btn_layout.addWidget(self.btn_remove)
-        order_buttons_layout = QHBoxLayout()
-        order_buttons_layout.addWidget(self.btn_move_up)
-        order_buttons_layout.addWidget(self.btn_move_down)
-        btn_layout.addLayout(order_buttons_layout)
-        list_layout.addLayout(btn_layout)
+        list_layout.addWidget(self.dataset_list, 1)
         list_group.setLayout(list_layout)
         layout.addWidget(list_group)
         
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("workspaceTabs")
+        self.tabs.tabBar().hide()
+        self.tabs.setIconSize(QSize(17, 17))
         
         # --- Tab 1: Appearance ---
         tab_data = QWidget()
         data_layout = QVBoxLayout()
         
         colors_group = QGroupBox("Color Settings")
-        colors_layout = QVBoxLayout()
-        colors_layout.addWidget(QLabel("Base Color:"))
+        colors_layout = QFormLayout()
         self.base_color_combo = QComboBox()
         self.base_color_combo.addItems(["C0", "C1", "C2", "C3", "C4", "C5", "red", "green", "blue", "gray", "black", "orange", "purple"])
         self.base_color_combo.currentIndexChanged.connect(self._on_settings_changed)
-        colors_layout.addWidget(self.base_color_combo)
         
-        colors_layout.addWidget(QLabel("Color Mapping Column (Overrides Base Color):"))
         self.color_combo = QComboBox()
         self.color_combo.addItem("None")
         self.color_combo.currentIndexChanged.connect(self._on_settings_changed)
-        colors_layout.addWidget(self.color_combo)
+        colors_layout.addRow("Base Color:", self.base_color_combo)
+        colors_layout.addRow("Mapping Column:", self.color_combo)
         colors_group.setLayout(colors_layout)
         data_layout.addWidget(colors_group)
 
         analysis_display_group = QGroupBox("Analysis Display")
         analysis_display_layout = QVBoxLayout()
-        self.show_error_map_check = QCheckBox("Show latest pointwise error map")
+        self.show_error_map_check = QCheckBox("Show error map")
         self.show_error_map_check.setToolTip(
             "Show or hide the latest calculated per-point distance colours for the selected cloud without "
             "recalculating the surface error."
@@ -118,6 +125,7 @@ class ControlPanel(QWidget):
         self.show_error_map_check.toggled.connect(self.error_map_display_changed.emit)
         analysis_display_layout.addWidget(self.show_error_map_check)
         self.error_map_colour_mode_combo = QComboBox()
+        self.error_map_colour_mode_combo.setMaximumWidth(210)
         self.error_map_colour_mode_combo.addItem("Calculated deviation", "closest_distance")
         self.error_map_colour_mode_combo.addItem("Difference from mean deviation", "difference_from_mean")
         self.error_map_colour_mode_combo.setToolTip(
@@ -127,8 +135,9 @@ class ControlPanel(QWidget):
         self.error_map_colour_mode_combo.currentIndexChanged.connect(
             lambda _: self.error_map_colour_mode_changed.emit(self.error_map_colour_mode_combo.currentData())
         )
-        analysis_display_layout.addWidget(QLabel("Error-map colouring:"))
-        analysis_display_layout.addWidget(self.error_map_colour_mode_combo)
+        error_map_form = QFormLayout()
+        error_map_form.addRow("Error map:", self.error_map_colour_mode_combo)
+        analysis_display_layout.addLayout(error_map_form)
         error_map_info = QLabel(
             "Available after a surface-error calculation. The normal cloud colours are restored when disabled."
         )
@@ -141,6 +150,8 @@ class ControlPanel(QWidget):
 
         camera_group = QGroupBox("Camera Orientation")
         camera_layout = QGridLayout()
+        camera_layout.setHorizontalSpacing(10)
+        camera_layout.setVerticalSpacing(4)
 
         def camera_button(label, view_name, tooltip):
             button = QPushButton(label)
@@ -148,22 +159,22 @@ class ControlPanel(QWidget):
             button.clicked.connect(lambda: self.camera_view_requested.emit(view_name))
             return button
 
-        camera_layout.addWidget(camera_button("Top (+Z)", "top", "Look down the positive Z axis."), 0, 1)
-        camera_layout.addWidget(camera_button("+X", "positive_x", "Look along the positive X axis."), 1, 0)
-        camera_layout.addWidget(camera_button("−Y", "negative_y", "Look along the negative Y axis (front view)."), 1, 1)
-        camera_layout.addWidget(camera_button("−X", "negative_x", "Look along the negative X axis."), 1, 2)
-        camera_layout.addWidget(camera_button("+Y", "positive_y", "Look along the positive Y axis (back view)."), 2, 1)
-        camera_layout.addWidget(camera_button("Bottom (−Z)", "bottom", "Look up the negative Z axis."), 3, 1)
+        camera_layout.addWidget(camera_button("Top (+Z)", "top", "Look down the positive Z axis."), 0, 0, 1, 2)
+        camera_layout.addWidget(camera_button("Bottom (−Z)", "bottom", "Look up the negative Z axis."), 0, 2, 1, 2)
+        camera_layout.addWidget(camera_button("−X", "negative_x", "Look along the negative X axis."), 1, 0)
+        camera_layout.addWidget(camera_button("+X", "positive_x", "Look along the positive X axis."), 1, 1)
+        camera_layout.addWidget(camera_button("−Y", "negative_y", "Look along the negative Y axis (front view)."), 1, 2)
+        camera_layout.addWidget(camera_button("+Y", "positive_y", "Look along the positive Y axis (back view)."), 1, 3)
         camera_layout.addWidget(
             camera_button(
                 "Diagonal (−X,+Y,+Z)",
                 "diagonal_negative_x_positive_y_positive_z",
                 "User-selected diagonal view: elevation −30°, azimuth −45°, roll 180°.",
             ),
-            4,
+            2,
             0,
             1,
-            3,
+            4,
         )
 
         rotate_left = QPushButton("↺ 90°")
@@ -173,9 +184,9 @@ class ControlPanel(QWidget):
         rotate_right = QPushButton("↻ 90°")
         rotate_right.setToolTip("Rotate the camera 90 degrees clockwise around Z.")
         rotate_right.clicked.connect(lambda: self.camera_rotate_requested.emit(90.0))
-        camera_layout.addWidget(rotate_left, 5, 0)
-        camera_layout.addWidget(isometric, 5, 1)
-        camera_layout.addWidget(rotate_right, 5, 2)
+        camera_layout.addWidget(rotate_left, 3, 0)
+        camera_layout.addWidget(isometric, 3, 1, 1, 2)
+        camera_layout.addWidget(rotate_right, 3, 3)
         self.camera_elevation_spin = QDoubleSpinBox()
         self.camera_azimuth_spin = QDoubleSpinBox()
         self.camera_roll_spin = QDoubleSpinBox()
@@ -193,33 +204,195 @@ class ControlPanel(QWidget):
         self.camera_roll_spin.setValue(0.0)
         self.btn_apply_camera_angles = QPushButton("Apply Camera Angles")
         self.btn_apply_camera_angles.clicked.connect(self._on_apply_camera_angles_clicked)
-        self.btn_read_camera_angles = QPushButton("Read Current View")
-        self.btn_read_camera_angles.setToolTip(
-            "Copies the current interactive 3-D camera orientation into the fields above."
-        )
-        self.btn_read_camera_angles.clicked.connect(self.camera_angles_read_requested.emit)
-        camera_layout.addWidget(QLabel("Elevation:"), 6, 0)
-        camera_layout.addWidget(self.camera_elevation_spin, 6, 1)
-        camera_layout.addWidget(QLabel("Azimuth:"), 7, 0)
-        camera_layout.addWidget(self.camera_azimuth_spin, 7, 1)
-        camera_layout.addWidget(QLabel("Roll:"), 8, 0)
-        camera_layout.addWidget(self.camera_roll_spin, 8, 1)
-        camera_layout.addWidget(self.btn_read_camera_angles, 9, 0)
-        camera_layout.addWidget(self.btn_apply_camera_angles, 9, 1, 1, 2)
+        camera_layout.addWidget(QLabel("Elevation:"), 4, 0, 1, 2)
+        camera_layout.addWidget(self.camera_elevation_spin, 4, 2, 1, 2)
+        camera_layout.addWidget(QLabel("Azimuth:"), 5, 0, 1, 2)
+        camera_layout.addWidget(self.camera_azimuth_spin, 5, 2, 1, 2)
+        camera_layout.addWidget(QLabel("Roll:"), 6, 0, 1, 2)
+        camera_layout.addWidget(self.camera_roll_spin, 6, 2, 1, 2)
+        camera_layout.addWidget(self.btn_apply_camera_angles, 7, 0, 1, 4)
         camera_group.setLayout(camera_layout)
-        data_layout.addWidget(camera_group)
-        
+        self.camera_group = camera_group
+
         data_layout.addStretch()
         tab_data.setLayout(data_layout)
+
+        # --- Tab 2: Live preview appearance ---
+        tab_preview_plot = QWidget()
+        preview_plot_layout = QVBoxLayout()
+        preview_colour_group = QGroupBox("Colour Mapping")
+        preview_colour_form = QFormLayout()
+        self.preview_use_heatmap_check = QCheckBox("Use error heatmap")
+        self.preview_use_heatmap_check.setChecked(True)
+        self.preview_use_heightmap_check = QCheckBox("Height map (Z)")
+        self.preview_use_heatmap_check.toggled.connect(
+            lambda checked: self.preview_use_heightmap_check.setChecked(False) if checked else None
+        )
+        self.preview_use_heightmap_check.toggled.connect(
+            lambda checked: self.preview_use_heatmap_check.setChecked(False) if checked else None
+        )
+        self.preview_heatmap_colormap_combo = QComboBox()
+        self.preview_heatmap_colormap_combo.addItem("Automatic (by error method)", "auto")
+        self.preview_heatmap_colormap_combo.addItem("Blue / white at zero / red", "blue_white_red")
+        self.preview_heatmap_colormap_combo.addItem("Blue / beige at zero / red", "blue_beige_red")
+        for colormap in ("turbo", "viridis", "plasma", "inferno", "magma", "cividis", "coolwarm"):
+            self.preview_heatmap_colormap_combo.addItem(colormap, colormap)
+        self.preview_heightmap_colormap_combo = QComboBox()
+        self.preview_heightmap_colormap_combo.addItems(
+            ["viridis", "turbo", "plasma", "inferno", "magma", "cividis", "coolwarm", "height_blue_rose"]
+        )
+
+        def preview_spin(minimum, maximum, value, step=1.0, decimals=1, suffix=""):
+            spin = QDoubleSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setValue(value)
+            spin.setSingleStep(step)
+            spin.setDecimals(decimals)
+            if suffix:
+                spin.setSuffix(suffix)
+            return spin
+
+        self.preview_colourbar_height_spin = preview_spin(0.1, 1.0, 1.0, 0.05, 2)
+        self.preview_colourbar_decimals_spin = QSpinBox()
+        self.preview_colourbar_decimals_spin.setRange(0, 10)
+        self.preview_colourbar_decimals_spin.setValue(2)
+        self.preview_colourbar_label = QTextEdit()
+        self.preview_colourbar_label.setPlaceholderText(
+            "Custom colour-bar label; leave empty for the automatic label."
+        )
+        self.preview_colourbar_label.setFixedHeight(56)
+        self.preview_colourbar_label_font_size_spin = preview_spin(1.0, 72.0, 10.0, 0.5, 1, " pt")
+        self.preview_colourbar_tick_font_size_spin = preview_spin(1.0, 72.0, 10.0, 0.5, 1, " pt")
+        preview_colour_form.addRow("Use error heatmap:", self.preview_use_heatmap_check)
+        preview_colour_form.addRow("Height map (Z):", self.preview_use_heightmap_check)
+        preview_colour_form.addRow("Heatmap colours:", self.preview_heatmap_colormap_combo)
+        preview_colour_form.addRow("Height-map colours:", self.preview_heightmap_colormap_combo)
+        preview_colour_form.addRow("Colour-bar height:", self.preview_colourbar_height_spin)
+        preview_colour_form.addRow("Colour-bar decimal places:", self.preview_colourbar_decimals_spin)
+        preview_colour_form.addRow("Colour-bar label:", self.preview_colourbar_label)
+        preview_colour_form.addRow("Colour-bar label font size:", self.preview_colourbar_label_font_size_spin)
+        preview_colour_form.addRow("Colour-bar numbers font size:", self.preview_colourbar_tick_font_size_spin)
+        preview_colour_group.setLayout(preview_colour_form)
+
+        preview_axes_group = QGroupBox("Axes")
+        preview_axes_form = QFormLayout()
+        self.preview_point_size_spin = preview_spin(0.1, 20.0, 10.0, 0.1, 1)
+        self.preview_x_axis_name = QLineEdit("X")
+        self.preview_y_axis_name = QLineEdit("Y")
+        self.preview_z_axis_name = QLineEdit("Z")
+        self.preview_axis_label_font_size_spin = preview_spin(1.0, 72.0, 10.0, 0.5, 1, " pt")
+        self.preview_axis_tick_font_size_spin = preview_spin(1.0, 72.0, 10.0, 0.5, 1, " pt")
+        self.preview_z_label_spacing_spin = preview_spin(0.0, 200.0, 0.0, 1.0, 1, " pt")
+        self.preview_z_label_spacing_spin.setSpecialValueText("Auto")
+        self.preview_z_tick_label_gap_spin = preview_spin(0.0, 200.0, 0.0, 1.0, 1, " pt")
+        self.preview_z_tick_label_gap_spin.setSpecialValueText("Default")
+        self.preview_z_ticks_spin = QSpinBox()
+        self.preview_z_ticks_spin.setRange(0, 20)
+        self.preview_z_ticks_spin.setSpecialValueText("Auto")
+        self.preview_z_tick_interval_spin = preview_spin(0.0, 1e9, 0.0, 1.0, 4)
+        self.preview_z_tick_interval_spin.setSpecialValueText("Auto / tick count")
+        self.preview_z_tick_interval_spin.valueChanged.connect(
+            lambda interval: self.preview_z_ticks_spin.setEnabled(interval == 0)
+        )
+        preview_axes_form.addRow("Point size:", self.preview_point_size_spin)
+        preview_axes_form.addRow("X-axis label:", self.preview_x_axis_name)
+        preview_axes_form.addRow("Y-axis label:", self.preview_y_axis_name)
+        preview_axes_form.addRow("Z-axis label:", self.preview_z_axis_name)
+        preview_axes_form.addRow("Axis label font size:", self.preview_axis_label_font_size_spin)
+        preview_axes_form.addRow("Axis numbers font size:", self.preview_axis_tick_font_size_spin)
+        preview_axes_form.addRow("Z-axis title gap:", self.preview_z_label_spacing_spin)
+        preview_axes_form.addRow("Z-axis tick label gap:", self.preview_z_tick_label_gap_spin)
+        preview_axes_form.addRow("Number of Z-axis ticks:", self.preview_z_ticks_spin)
+        preview_axes_form.addRow("Z-axis tick interval:", self.preview_z_tick_interval_spin)
+        preview_axes_group.setLayout(preview_axes_form)
+
+        preview_legend_group = QGroupBox("Legend")
+        preview_legend_form = QFormLayout()
+        self.preview_show_legend_check = QCheckBox("Show legend")
+        self.preview_show_legend_check.setChecked(True)
+        self.preview_legend_point_size_spin = preview_spin(0.1, 100.0, 16.0, 1.0, 1)
+        self.preview_legend_placement_combo = QComboBox()
+        self.preview_legend_placement_combo.addItem("Inside plot", "inside")
+        self.preview_legend_placement_combo.addItem("Outside plot", "outside")
+        self.preview_legend_placement_combo.addItem("Best position (inside)", "best")
+        self.preview_legend_position_combo = QComboBox()
+        for label, value in (("Upper right", "upper right"), ("Upper left", "upper left"),
+                             ("Lower right", "lower right"), ("Lower left", "lower left")):
+            self.preview_legend_position_combo.addItem(label, value)
+        self.preview_legend_title = QLineEdit()
+        self.preview_legend_labels = QTextEdit()
+        self.preview_legend_labels.setPlaceholderText("One label per point cloud, in list order.")
+        self.preview_legend_labels.setFixedHeight(56)
+        preview_legend_form.addRow("Show legend:", self.preview_show_legend_check)
+        preview_legend_form.addRow("Legend point size:", self.preview_legend_point_size_spin)
+        preview_legend_form.addRow("Legend placement:", self.preview_legend_placement_combo)
+        preview_legend_form.addRow("Legend corner:", self.preview_legend_position_combo)
+        preview_legend_form.addRow("Legend title:", self.preview_legend_title)
+        preview_legend_form.addRow("Legend labels:", self.preview_legend_labels)
+        preview_legend_group.setLayout(preview_legend_form)
+
+        preview_plot_layout.addWidget(preview_colour_group)
+        preview_plot_layout.addWidget(preview_axes_group)
+        preview_plot_layout.addWidget(preview_legend_group)
+        preview_plot_layout.addStretch()
+        tab_preview_plot.setLayout(preview_plot_layout)
+        self.preview_plot_groups = (preview_colour_group, preview_axes_group, preview_legend_group)
+        self.preview_plot_fields = {
+            "use_heatmap": self.preview_use_heatmap_check,
+            "use_heightmap": self.preview_use_heightmap_check,
+            "heatmap_colormap": self.preview_heatmap_colormap_combo,
+            "heightmap_colormap": self.preview_heightmap_colormap_combo,
+            "colourbar_height": self.preview_colourbar_height_spin,
+            "colourbar_decimals": self.preview_colourbar_decimals_spin,
+            "colourbar_label": self.preview_colourbar_label,
+            "colourbar_label_font_size": self.preview_colourbar_label_font_size_spin,
+            "colourbar_tick_font_size": self.preview_colourbar_tick_font_size_spin,
+            "point_size": self.preview_point_size_spin,
+            "x_label": self.preview_x_axis_name,
+            "y_label": self.preview_y_axis_name,
+            "z_label": self.preview_z_axis_name,
+            "axis_label_font_size": self.preview_axis_label_font_size_spin,
+            "axis_tick_font_size": self.preview_axis_tick_font_size_spin,
+            "z_axis_label_spacing": self.preview_z_label_spacing_spin,
+            "z_axis_tick_label_gap": self.preview_z_tick_label_gap_spin,
+            "z_axis_ticks": self.preview_z_ticks_spin,
+            "z_axis_tick_interval": self.preview_z_tick_interval_spin,
+            "show_legend": self.preview_show_legend_check,
+            "legend_point_size": self.preview_legend_point_size_spin,
+            "legend_placement": self.preview_legend_placement_combo,
+            "legend_position": self.preview_legend_position_combo,
+            "legend_title": self.preview_legend_title,
+            "legend_labels": self.preview_legend_labels,
+        }
+        self._loading_preview_plot_settings = False
+        for field in self.preview_plot_fields.values():
+            if isinstance(field, QCheckBox):
+                field.toggled.connect(self._emit_preview_plot_settings_changed)
+            elif isinstance(field, QComboBox):
+                field.currentIndexChanged.connect(self._emit_preview_plot_settings_changed)
+            elif isinstance(field, (QSpinBox, QDoubleSpinBox)):
+                field.valueChanged.connect(self._emit_preview_plot_settings_changed)
+            elif isinstance(field, QLineEdit):
+                field.textChanged.connect(self._emit_preview_plot_settings_changed)
+            elif isinstance(field, QTextEdit):
+                field.textChanged.connect(self._emit_preview_plot_settings_changed)
+
+        self.btn_use_preview_settings = QPushButton("Use preview settings")
+        self.btn_use_preview_settings.setToolTip(
+            "Copy the live preview's appearance settings into the active export profile."
+        )
+        self.btn_use_preview_settings.clicked.connect(self._copy_preview_settings_to_export)
         
-        # --- Tab 2: Filtering ---
+        # --- Tab 3: Filtering ---
         tab_filter = QWidget()
         filter_layout = QVBoxLayout()
         
         # Voxel Downsampling
-        voxel_group = QGroupBox("Voxel Grid Downsampling (Uniform)")
-        voxel_layout = QHBoxLayout()
-        self.voxel_check = QCheckBox("Enable Voxel Filter")
+        voxel_group = QGroupBox()
+        voxel_group.setObjectName("filterBlock")
+        voxel_layout = QVBoxLayout()
+        self.voxel_check = QCheckBox("Voxel Grid Downsampling (Uniform)")
+        self.voxel_check.setObjectName("filterHeadingCheck")
         self.voxel_check.stateChanged.connect(self._on_settings_changed)
         self.voxel_check.setToolTip("Uniformly downsamples the point cloud by merging points within 3D grid cells (voxels).")
         
@@ -230,9 +403,13 @@ class ControlPanel(QWidget):
         self.voxel_spin.setSingleStep(0.05)
         self.voxel_spin.setDecimals(3)
         self.voxel_spin.valueChanged.connect(self._on_settings_changed)
+        self.voxel_check.toggled.connect(self.voxel_spin.setEnabled)
+        self.voxel_spin.setEnabled(self.voxel_check.isChecked())
         voxel_layout.addWidget(self.voxel_check)
-        voxel_layout.addWidget(QLabel("Voxel Size:"))
-        voxel_layout.addWidget(self.voxel_spin)
+        voxel_fields = QFormLayout()
+        voxel_fields.setContentsMargins(22, 0, 0, 0)
+        voxel_fields.addRow("Voxel Size:", self.voxel_spin)
+        voxel_layout.addLayout(voxel_fields)
         voxel_group.setLayout(voxel_layout)
         filter_layout.addWidget(voxel_group)
         
@@ -241,21 +418,27 @@ class ControlPanel(QWidget):
         # Outliers
         outlier_group = QGroupBox("Outlier Filters")
         outlier_layout = QVBoxLayout()
+        outlier_layout.setSpacing(10)
         
-        zscore_layout = QHBoxLayout()
+        zscore_layout = QFormLayout()
         self.zscore_check = QCheckBox("Z-Score")
+        self.zscore_check.setObjectName("filterHeadingCheck")
         self.zscore_check.stateChanged.connect(self._on_settings_changed)
         self.zscore_spin = QDoubleSpinBox()
         self.zscore_spin.setRange(0.1, 10.0)
         self.zscore_spin.setValue(3.0)
         self.zscore_spin.setSingleStep(0.1)
         self.zscore_spin.valueChanged.connect(self._on_settings_changed)
-        zscore_layout.addWidget(self.zscore_check)
-        zscore_layout.addWidget(self.zscore_spin)
+        self.zscore_check.toggled.connect(self.zscore_spin.setEnabled)
+        self.zscore_spin.setEnabled(self.zscore_check.isChecked())
+        outlier_layout.addWidget(self.zscore_check)
+        zscore_layout.setContentsMargins(22, 0, 0, 0)
+        zscore_layout.addRow("Threshold:", self.zscore_spin)
         outlier_layout.addLayout(zscore_layout)
         
-        sor_layout = QHBoxLayout()
+        sor_layout = QFormLayout()
         self.sor_check = QCheckBox("SOR")
+        self.sor_check.setObjectName("filterHeadingCheck")
         self.sor_check.stateChanged.connect(self._on_settings_changed)
         self.sor_k_spin = QSpinBox()
         self.sor_k_spin.setRange(1, 1000)
@@ -265,18 +448,21 @@ class ControlPanel(QWidget):
         self.sor_std_spin.setRange(0.1, 10.0)
         self.sor_std_spin.setValue(1.0)
         self.sor_std_spin.valueChanged.connect(self._on_settings_changed)
-        sor_layout.addWidget(self.sor_check)
-        sor_layout.addWidget(QLabel("k:"))
-        sor_layout.addWidget(self.sor_k_spin)
-        sor_layout.addWidget(QLabel("Std:"))
-        sor_layout.addWidget(self.sor_std_spin)
+        self.sor_check.toggled.connect(self.sor_k_spin.setEnabled)
+        self.sor_check.toggled.connect(self.sor_std_spin.setEnabled)
+        self.sor_k_spin.setEnabled(self.sor_check.isChecked())
+        self.sor_std_spin.setEnabled(self.sor_check.isChecked())
+        outlier_layout.addWidget(self.sor_check)
+        sor_layout.setContentsMargins(22, 0, 0, 0)
+        sor_layout.addRow("k:", self.sor_k_spin)
+        sor_layout.addRow("Std:", self.sor_std_spin)
         outlier_layout.addLayout(sor_layout)
         
-        bbox_layout = QVBoxLayout()
+        bbox_layout = QFormLayout()
         self.bbox_check = QCheckBox("Z-Bounds")
+        self.bbox_check.setObjectName("filterHeadingCheck")
         self.bbox_check.stateChanged.connect(self._on_settings_changed)
-        bbox_layout.addWidget(self.bbox_check)
-        bbox_grid = QHBoxLayout()
+        outlier_layout.addWidget(self.bbox_check)
         self.bbox_zmin = QDoubleSpinBox()
         self.bbox_zmin.setRange(-10000, 10000)
         self.bbox_zmin.setValue(-1000)
@@ -285,26 +471,17 @@ class ControlPanel(QWidget):
         self.bbox_zmax.setRange(-10000, 10000)
         self.bbox_zmax.setValue(1000)
         self.bbox_zmax.valueChanged.connect(self._on_settings_changed)
-        bbox_grid.addWidget(QLabel("Min:"))
-        bbox_grid.addWidget(self.bbox_zmin)
-        bbox_grid.addWidget(QLabel("Max:"))
-        bbox_grid.addWidget(self.bbox_zmax)
-        bbox_layout.addLayout(bbox_grid)
+        self.bbox_check.toggled.connect(self.bbox_zmin.setEnabled)
+        self.bbox_check.toggled.connect(self.bbox_zmax.setEnabled)
+        self.bbox_zmin.setEnabled(self.bbox_check.isChecked())
+        self.bbox_zmax.setEnabled(self.bbox_check.isChecked())
+        bbox_layout.setContentsMargins(22, 0, 0, 0)
+        bbox_layout.addRow("Min:", self.bbox_zmin)
+        bbox_layout.addRow("Max:", self.bbox_zmax)
         outlier_layout.addLayout(bbox_layout)
         
         outlier_group.setLayout(outlier_layout)
         filter_layout.addWidget(outlier_group)
-        
-        self.btn_save_data = QPushButton("Save Filtered Data")
-        self.btn_save_data.clicked.connect(self.save_data_requested.emit)
-        filter_layout.addWidget(self.btn_save_data)
-
-        self.btn_centre_data = QPushButton("Create Centred Copy")
-        self.btn_centre_data.setToolTip(
-            "Copy the selected original cloud and translate every XYZ point so its centroid is at (0, 0, 0)."
-        )
-        self.btn_centre_data.clicked.connect(self.centre_data_requested.emit)
-        filter_layout.addWidget(self.btn_centre_data)
         
         filter_layout.addStretch()
         tab_filter.setLayout(filter_layout)
@@ -324,23 +501,31 @@ class ControlPanel(QWidget):
         manual_form = QFormLayout()
         
         # Transform Presets
-        preset_layout = QHBoxLayout()
+        preset_layout = QGridLayout()
+        preset_layout.setVerticalSpacing(7)
         self.preset_combo = QComboBox()
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
         
-        self.btn_preset_save = QPushButton("Save As...")
+        self.btn_preset_save = QPushButton("Save")
+        self.btn_preset_save.setIcon(monochrome_icon("save", "#526174"))
+        self.btn_preset_save.setToolTip("Save the current transform as a preset.")
         self.btn_preset_save.clicked.connect(self._on_preset_save_clicked)
         
-        self.btn_preset_rename = QPushButton("Rename...")
+        self.btn_preset_rename = QPushButton("Rename")
+        self.btn_preset_rename.setIcon(monochrome_icon("edit", "#526174"))
+        self.btn_preset_rename.setToolTip("Rename the selected transform preset.")
         self.btn_preset_rename.clicked.connect(self._on_preset_rename_clicked)
         
         self.btn_preset_delete = QPushButton("Delete")
+        self.btn_preset_delete.setIcon(monochrome_icon("trash", "#526174"))
         self.btn_preset_delete.clicked.connect(self._on_preset_delete_clicked)
         
-        preset_layout.addWidget(self.preset_combo, 1)
-        preset_layout.addWidget(self.btn_preset_save)
-        preset_layout.addWidget(self.btn_preset_rename)
-        preset_layout.addWidget(self.btn_preset_delete)
+        preset_layout.addWidget(self.preset_combo, 0, 0, 1, 3)
+        preset_layout.addWidget(self.btn_preset_save, 1, 0)
+        preset_layout.addWidget(self.btn_preset_rename, 1, 1)
+        preset_layout.addWidget(self.btn_preset_delete, 1, 2)
+        for column in range(3):
+            preset_layout.setColumnStretch(column, 1)
         
         manual_form.addRow("Preset:", preset_layout)
         
@@ -392,17 +577,20 @@ class ControlPanel(QWidget):
         self._refresh_distance_unit_labels()
         
         # Invert axis options
-        invert_layout = QHBoxLayout()
+        invert_layout = QGridLayout()
         self.invert_x_check = QCheckBox("Invert X")
         self.invert_y_check = QCheckBox("Invert Y")
         self.invert_z_check = QCheckBox("Invert Z")
         # Apply is now done via button instead of stateChanged
-        invert_layout.addWidget(self.invert_x_check)
-        invert_layout.addWidget(self.invert_y_check)
-        invert_layout.addWidget(self.invert_z_check)
+        invert_layout.addWidget(self.invert_x_check, 0, 0)
+        invert_layout.addWidget(self.invert_y_check, 0, 1)
+        invert_layout.addWidget(self.invert_z_check, 0, 2)
+        for column in range(3):
+            invert_layout.setColumnStretch(column, 1)
         manual_form.addRow("Invert Axis:", invert_layout)
         
-        self.btn_apply_transform = QPushButton("Apply Transform")
+        self.btn_apply_transform = QPushButton("Apply")
+        self.btn_apply_transform.setToolTip("Apply the manual transform to the selected point cloud.")
         self.btn_apply_transform.clicked.connect(self._on_settings_changed)
         manual_form.addRow("", self.btn_apply_transform)
         
@@ -415,24 +603,20 @@ class ControlPanel(QWidget):
         icp_layout = QFormLayout()
         self.icp_target_combo = QComboBox()
         
-        self.icp_method_combo = QComboBox()
-        self.icp_method_combo.addItems(["Standard ICP", "Robust ICP (Partial Overlap)"])
-        
         self.icp_distance_spin = QDoubleSpinBox()
         self.icp_distance_spin.setRange(0.001, 10000.0)
         self.icp_distance_spin.setValue(1.0)
         self.icp_distance_spin.setDecimals(3)
         self.icp_distance_spin.setToolTip("The search radius for matching points. Set this to your estimated manual alignment error in your data's units. E.g., if you are off by ~2 meters, enter 2.0. Values that are too large cause incorrect matches.")
         
-        self.btn_run_icp = QPushButton("Run Legacy ICP (Selected -> Target)")
+        self.btn_run_icp = QPushButton("Run ICP")
         self.btn_run_icp.clicked.connect(self._on_run_icp_clicked)
         
         icp_layout.addRow("Target (Reference):", self.icp_target_combo)
-        icp_layout.addRow("Method:", self.icp_method_combo)
         icp_layout.addRow("Max Distance:", self.icp_distance_spin)
         
         icp_info = QLabel(
-            "For drone scans with partial overlap, use Bounded Manual Fine Alignment below. "
+            "For drone scans with partial overlap, use Bounded fine alignment. "
             "Legacy ICP is retained for advanced use and can move to an unintended similar surface."
         )
         icp_info.setWordWrap(True)
@@ -441,7 +625,6 @@ class ControlPanel(QWidget):
         
         icp_layout.addRow("", self.btn_run_icp)
         icp_group.setLayout(icp_layout)
-        legacy_alignment_layout.addWidget(icp_group)
 
         legacy_global_group = QGroupBox("Previous Global Auto Alignment (PCA / FPFH)")
         legacy_global_layout = QFormLayout()
@@ -453,7 +636,8 @@ class ControlPanel(QWidget):
         self.legacy_global_points_spin.setToolTip(
             "Maximum voxel-downsampled points per cloud used by the previous global PCA/feature alignment."
         )
-        self.btn_run_legacy_global_alignment = QPushButton("Run Previous Global Auto Align")
+        self.btn_run_legacy_global_alignment = QPushButton("Run global alignment")
+        self.btn_run_legacy_global_alignment.setToolTip("Run global PCA / FPFH alignment.")
         self.btn_run_legacy_global_alignment.clicked.connect(self._on_run_legacy_global_alignment_clicked)
         legacy_global_info = QLabel(
             "This restores the previous broad PCA / centre-of-gravity / FPFH search. It uses the current "
@@ -467,14 +651,15 @@ class ControlPanel(QWidget):
         legacy_global_layout.addRow("", self.btn_run_legacy_global_alignment)
         legacy_global_layout.addRow("", legacy_global_info)
         legacy_global_group.setLayout(legacy_global_layout)
-        legacy_alignment_layout.addWidget(legacy_global_group)
 
-        # Automatic registration and comparison intentionally have their own
-        # reference selectors: an alignment can be inspected before its error
-        # is evaluated against the chosen reference cloud.
+        # Automatic registration and comparison have dedicated selectors, so
+        # both alignment clouds can be chosen here without changing the list selection.
         auto_group = QGroupBox("Bounded Manual Fine Alignment (Selected -> Reference)")
         auto_layout = QFormLayout()
+        self.auto_source_combo = QComboBox()
+        self.auto_source_combo.setToolTip("Point cloud that will be moved during alignment.")
         self.auto_target_combo = QComboBox()
+        self.auto_target_combo.setToolTip("Reference point cloud that remains fixed during alignment.")
         self.auto_points_spin = QSpinBox()
         self.auto_points_spin.setRange(1_000, 100_000)
         self.auto_points_spin.setValue(30_000)
@@ -507,8 +692,9 @@ class ControlPanel(QWidget):
         self.auto_rx_limit_spin = component_limit(5.0, 30.0, 1, " deg", rotation_tooltip)
         self.auto_ry_limit_spin = component_limit(5.0, 30.0, 1, " deg", rotation_tooltip)
         self.auto_rz_limit_spin = component_limit(5.0, 30.0, 1, " deg", rotation_tooltip)
-        self.btn_run_auto_alignment = QPushButton("Optimise Manual Alignment")
+        self.btn_run_auto_alignment = QPushButton("Optimise alignment")
         self.btn_run_auto_alignment.clicked.connect(self._on_run_auto_alignment_clicked)
+        auto_layout.addRow("Selected cloud:", self.auto_source_combo)
         auto_layout.addRow("Reference:", self.auto_target_combo)
         auto_layout.addRow("Registration points:", self.auto_points_spin)
         auto_layout.addRow("Translation X (+/-):", self.auto_tx_limit_spin)
@@ -520,7 +706,7 @@ class ControlPanel(QWidget):
         auto_layout.addRow("", self.btn_run_auto_alignment)
         auto_info = QLabel(
             "First make a rough manual placement, then optimize it here. The optimizer starts exactly at that pose, "
-            "changes only translation and rotation within the six limits above, and retains the manual pose unless the "
+            "changes only translation and rotation within the six limits shown, and retains the manual pose unless the "
             "frozen two-sided overlap improves measurably. For partial scans it first limits matching to the current shared X-Y footprint, "
             "so scan extensions with no counterpart do not steer the fit. Global PCA/centre-of-gravity search is intentionally not used. "
             "Both clouds must use the same units: set Uniform scale first if, for example, one file is in metres "
@@ -530,7 +716,6 @@ class ControlPanel(QWidget):
         auto_info.setStyleSheet("color: #888888; font-size: 11px; font-style: italic;")
         auto_layout.addRow("", auto_info)
         auto_group.setLayout(auto_layout)
-        fine_alignment_layout.addWidget(auto_group)
 
         comparison_group = QGroupBox("Surface Error (Source -> Reference)")
         comparison_layout = QFormLayout()
@@ -567,7 +752,7 @@ class ControlPanel(QWidget):
         self.comparison_normal_radius_spin = QDoubleSpinBox()
         self.comparison_normal_radius_spin.setRange(0.0, 1_000_000.0)
         self.comparison_normal_radius_spin.setDecimals(6)
-        self.comparison_normal_radius_spin.setSpecialValueText("Auto (3 x reference spacing)")
+        self.comparison_normal_radius_spin.setSpecialValueText("Auto")
         self.comparison_normal_radius_spin.setToolTip("PCA neighbourhood radius in the cloud's distance unit; larger radii smooth curvature.")
         self.comparison_normal_neighbours_spin = QSpinBox()
         self.comparison_normal_neighbours_spin.setRange(3, 500)
@@ -611,15 +796,15 @@ class ControlPanel(QWidget):
             "Zero means automatic only outside custom mode. Colour clipping does not alter statistics."
         )
         self.error_map_max_spin.valueChanged.connect(self.error_map_max_changed.emit)
-        self.btn_calculate_error = QPushButton("Calculate Surface Error")
+        self.btn_calculate_error = QPushButton("Calculate error")
         self.btn_calculate_error.clicked.connect(self._on_calculate_error_clicked)
-        self.comparison_show_map_check = QCheckBox("Show pointwise error colour map after calculation")
+        self.comparison_show_map_check = QCheckBox("Show error map")
         self.comparison_show_map_check.setChecked(True)
         self.comparison_show_map_check.setToolTip(
             "Colours every analysed source-cloud point using the selected error-map colouring. "
             "Points excluded from error statistics are shown in grey."
         )
-        self.comparison_highlight_mean_check = QCheckBox("Highlight errors above the mean in red")
+        self.comparison_highlight_mean_check = QCheckBox("Highlight above mean")
         self.comparison_highlight_mean_check.setToolTip(
             "Keeps the continuous distance colours below the mean and overlays overlap points above the "
             "reported mean distance in red."
@@ -646,7 +831,7 @@ class ControlPanel(QWidget):
         self.comparison_status = QLabel("No results — calculate surface error")
         self.comparison_status.setWordWrap(True)
         self.comparison_status.setTextFormat(Qt.TextFormat.PlainText)
-        self.btn_comparison_report = QPushButton("View Surface Error Results…")
+        self.btn_comparison_report = QPushButton("View results…")
         self.btn_comparison_report.setEnabled(False)
         self.btn_comparison_report.clicked.connect(self.comparison_report_requested.emit)
         comparison_layout.addRow("Source:", self.comparison_source_combo)
@@ -686,9 +871,9 @@ class ControlPanel(QWidget):
 
         export_options_group = QGroupBox("Export Appearance")
         export_options_layout = QFormLayout()
-        self.export_heatmap_check = QCheckBox("Use active error heatmap")
+        self.export_heatmap_check = QCheckBox("Use error heatmap")
         self.export_heatmap_check.setChecked(True)
-        self.export_heightmap_check = QCheckBox("Height map (Z coordinate)")
+        self.export_heightmap_check = QCheckBox("Height map (Z)")
         self.export_heightmap_check.setToolTip(
             "Colour all exported points by their transformed Z coordinate with one shared colour scale. "
             "This takes priority over the error heatmap and reveals surface curvature and drilled holes."
@@ -725,7 +910,7 @@ class ControlPanel(QWidget):
         self.export_colourbar_label.setPlaceholderText(
             "Unsigned distance to reference\n(mm; colours capped at manual max)"
         )
-        self.export_colourbar_label.setFixedHeight(72)
+        self.export_colourbar_label.setFixedHeight(56)
         self.export_colourbar_label.setToolTip(
             "Custom colour-bar label; press Enter to add a line break. "
             "Leave empty to use the automatic label with the current unit and colour limit."
@@ -813,7 +998,8 @@ class ControlPanel(QWidget):
             "One label per line, in the same order as the legend.\n"
             "Line 1 renames the first legend entry; line 2 the second."
         )
-        self.export_legend_labels.setFixedHeight(72)
+        self.export_legend_labels.setFixedHeight(56)
+        export_options_layout.addRow("", self.btn_use_preview_settings)
         export_options_layout.addRow("Heatmap:", self.export_heatmap_check)
         export_options_layout.addRow("Height map:", self.export_heightmap_check)
         export_options_layout.addRow("Heatmap colours:", self.export_heatmap_colormap_combo)
@@ -840,72 +1026,230 @@ class ControlPanel(QWidget):
         export_options_layout.addRow("Legend title:", self.export_legend_title)
         export_options_layout.addRow("Legend labels:", self.export_legend_labels)
         export_options_group.setLayout(export_options_layout)
+        self._default_export_options = deepcopy(self.get_export_options())
+
+        profile_group = QGroupBox("Export Profiles")
+        profile_row = QHBoxLayout()
+        profile_row.setContentsMargins(8, 4, 8, 6)
+        self.export_profile_combo = QComboBox()
+        self.export_profile_combo.setObjectName("exportProfileCombo")
+        self.export_profiles = {"Default": deepcopy(self._default_export_options)}
+        self._loading_export_profile = False
+        self.export_profile_combo.addItem("Default", "Default")
+        self.export_profile_combo.currentIndexChanged.connect(self._on_export_profile_selected)
+        profile_row.addWidget(self.export_profile_combo, 1)
+        self.btn_new_export_profile = self._profile_button("plus", "New export profile", self._new_export_profile)
+        self.btn_rename_export_profile = self._profile_button("edit", "Rename export profile", self._rename_export_profile)
+        self.btn_delete_export_profile = self._profile_button("trash", "Delete export profile", self._delete_export_profile)
+        self.btn_import_export_profile = self._profile_button(
+            "folder", "Import profile or export settings", self._import_export_profile
+        )
+        for button in (self.btn_new_export_profile, self.btn_rename_export_profile,
+                       self.btn_delete_export_profile, self.btn_import_export_profile):
+            profile_row.addWidget(button)
+        profile_group.setLayout(profile_row)
+        export_tab_layout.addWidget(profile_group)
         export_tab_layout.addWidget(export_options_group)
 
         export_actions_group = QGroupBox("Export Actions")
         export_actions_layout = QVBoxLayout()
-        self.btn_preview_export = QPushButton("Preview Export Settings")
+        self.btn_preview_export = QPushButton("Preview")
         self.btn_preview_export.setToolTip("Shows a fast preview using the current display resolution.")
         self.btn_preview_export.clicked.connect(self.export_preview_requested.emit)
-        self.btn_export_configured = QPushButton("Export Current Display")
+        self.btn_export_configured = QPushButton("Export display")
         self.btn_export_configured.clicked.connect(lambda: self._on_configured_export_clicked(False))
-        self.btn_export_configured_full = QPushButton("Export Full Resolution (No Voxel)")
+        self.btn_export_configured_full = QPushButton("Full resolution")
         self.btn_export_configured_full.clicked.connect(lambda: self._on_configured_export_clicked(True))
-        self.btn_save_export_settings = QPushButton("Save Export Settings…")
-        self.btn_save_export_settings.clicked.connect(self._on_save_export_settings_clicked)
-        self.btn_load_export_settings = QPushButton("Load Export Settings…")
-        self.btn_load_export_settings.clicked.connect(self._on_load_export_settings_clicked)
         export_actions_layout.addWidget(self.btn_preview_export)
         export_actions_layout.addWidget(self.btn_export_configured)
         export_actions_layout.addWidget(self.btn_export_configured_full)
-        export_actions_layout.addWidget(self.btn_save_export_settings)
-        export_actions_layout.addWidget(self.btn_load_export_settings)
         export_actions_group.setLayout(export_actions_layout)
         export_tab_layout.addWidget(export_actions_group)
         export_tab_layout.addStretch()
         tab_export.setLayout(export_tab_layout)
+        self._connect_export_profile_fields()
+        self._update_export_profile_buttons()
 
         manual_transform_layout.addStretch()
-        legacy_alignment_layout.addStretch()
         fine_alignment_layout.addStretch()
         tab_manual_transform.setLayout(manual_transform_layout)
-        tab_legacy_alignment.setLayout(legacy_alignment_layout)
         tab_fine_alignment.setLayout(fine_alignment_layout)
+
+        auto_heading = QLabel("Alignment method")
+        auto_heading.setObjectName("methodLabel")
+        legacy_alignment_layout.addWidget(auto_heading)
+        self.alignment_method_combo = QComboBox()
+        self.alignment_method_combo.addItems([
+            "Bounded fine alignment", "Standard ICP", "Robust ICP (Partial Overlap)",
+            "Global PCA / FPFH",
+        ])
+        for method_index in range(self.alignment_method_combo.count()):
+            self.alignment_method_combo.setItemData(method_index, self.alignment_method_combo.itemText(method_index))
+        legacy_alignment_layout.addWidget(self.alignment_method_combo)
+        self.method_pages = QStackedWidget()
+        method_layouts = []
+        for group in (auto_group, icp_group, legacy_global_group):
+            page = QWidget()
+            page.setObjectName("methodPage")
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 8, 0, 0)
+            page_layout.addWidget(group)
+            page_layout.addStretch()
+            method_layouts.append(page_layout)
+            self.method_pages.addWidget(page)
+        self.alignment_method_combo.currentIndexChanged.connect(self._on_alignment_method_changed)
+        legacy_alignment_layout.addWidget(self.method_pages)
+        legacy_alignment_layout.addStretch()
+        tab_legacy_alignment.setLayout(legacy_alignment_layout)
+
+        self.section_icons = []
+        def decorate_section(parent_layout, group, icon_name):
+            index = parent_layout.indexOf(group)
+            if index < 0:
+                return
+            header = QWidget()
+            header.setObjectName("toolSectionHeader")
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(10, 8, 10, 6)
+            icon = QLabel()
+            icon.setObjectName("toolSectionIcon")
+            icon.setFixedSize(20, 20)
+            title = QLabel(group.title())
+            title.setObjectName("toolSectionTitle")
+            header_layout.addWidget(icon)
+            header_layout.addWidget(title, 1)
+            parent_layout.insertWidget(index, header)
+            divider = QWidget()
+            divider.setObjectName("toolSectionDivider")
+            divider.setFixedHeight(1)
+            parent_layout.insertWidget(index + 1, divider)
+            group.setTitle("")
+            group.setObjectName("toolSection")
+            self.section_icons.append((icon, icon_name))
+
+        for page_layout, group, icon_name in (
+            (data_layout, colors_group, "data"), (data_layout, analysis_display_group, "evaluate"),
+            (preview_plot_layout, preview_colour_group, "data"),
+            (preview_plot_layout, preview_axes_group, "data"),
+            (preview_plot_layout, preview_legend_group, "preview"),
+            (filter_layout, outlier_group, "prepare"), (manual_transform_layout, manual_group, "align"),
+            (fine_alignment_layout, comparison_group, "evaluate"),
+            (export_tab_layout, profile_group, "save_as"),
+            (export_tab_layout, export_options_group, "export"),
+            (export_tab_layout, export_actions_group, "export"),
+            (method_layouts[0], auto_group, "align"),
+            (method_layouts[1], icp_group, "align"),
+            (method_layouts[2], legacy_global_group, "align"),
+        ):
+            decorate_section(page_layout, group, icon_name)
 
         def scrollable_tab(widget):
             scroll = QScrollArea()
+            scroll.setObjectName("toolPageScroll")
             scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             scroll.setWidget(widget)
+            scroll.viewport().setObjectName("toolPageViewport")
             return scroll
-        
-        self.tabs.addTab(scrollable_tab(tab_data), "Data")
-        self.tabs.addTab(scrollable_tab(tab_filter), "Prepare")
 
-        align_tab = QWidget()
-        align_layout = QVBoxLayout(align_tab)
-        self.alignment_tabs = QTabWidget()
-        self.alignment_tabs.addTab(scrollable_tab(tab_manual_transform), "Manual transform")
-        self.alignment_tabs.addTab(scrollable_tab(tab_legacy_alignment), "Global alignment")
-        align_layout.addWidget(self.alignment_tabs)
-        self.tabs.addTab(align_tab, "Align")
-        self.tabs.addTab(scrollable_tab(tab_fine_alignment), "Evaluate")
-        self.tabs.addTab(scrollable_tab(tab_export), "Export")
-        
+        self.tab_icons = ("data", "preview", "prepare", "align", "align", "evaluate", "export")
+        for name, page in (
+            ("Data", tab_data), ("Preview Plot", tab_preview_plot), ("Filter", tab_filter),
+            ("Manual Align", tab_manual_transform),
+            ("Auto Align", tab_legacy_alignment),
+            ("Evaluate", tab_fine_alignment), ("Export", tab_export),
+        ):
+            page.setObjectName("toolPage")
+            self.tabs.addTab(scrollable_tab(page), name)
+
+        self.tab_navigation = QWidget()
+        self.tab_navigation.setObjectName("workspaceTabNavigation")
+        navigation_layout = QHBoxLayout(self.tab_navigation)
+        navigation_layout.setContentsMargins(0, 0, 0, 0)
+        navigation_layout.setSpacing(5)
+        self.tab_scroll_left = QToolButton()
+        self.tab_scroll_left.setObjectName("workspaceTabArrow")
+        self.tab_scroll_left.setFixedSize(44, 44)
+        self.tab_scroll_left.setToolTip("Scroll tabs left")
+        self.tab_scroll_left.clicked.connect(lambda: self._scroll_tabs(-1))
+        navigation_layout.addWidget(self.tab_scroll_left)
+
+        self.tab_strip_scroll = QScrollArea()
+        self.tab_strip_scroll.setObjectName("workspaceTabScroll")
+        self.tab_strip_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.tab_strip_scroll.setWidgetResizable(False)
+        self.tab_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tab_strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tab_strip_scroll.setFixedHeight(46)
+        self.tab_strip_scroll.viewport().setObjectName("workspaceTabViewport")
+        navigation_layout.addWidget(self.tab_strip_scroll, 1)
+        self.tab_strip_widget = QWidget()
+        self.tab_strip_widget.setObjectName("workspaceTabStrip")
+        strip_layout = QHBoxLayout(self.tab_strip_widget)
+        strip_layout.setContentsMargins(0, 0, 0, 0)
+        strip_layout.setSpacing(4)
+        self.tab_buttons = []
+        tab_group = QButtonGroup(self)
+        tab_group.setExclusive(True)
+        for index in range(self.tabs.count()):
+            button = QToolButton()
+            button.setObjectName("workspaceTabButton")
+            button.setText(self.tabs.tabText(index))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setIconSize(QSize(17, 17))
+            button.setCheckable(True)
+            button.setFixedHeight(44)
+            button.clicked.connect(lambda checked, tab_index=index: self.tabs.setCurrentIndex(tab_index))
+            tab_group.addButton(button, index)
+            strip_layout.addWidget(button)
+            self.tab_buttons.append(button)
+        self.tab_buttons[0].setChecked(True)
+        self.tab_strip_scroll.setWidget(self.tab_strip_widget)
+        self.tab_strip_scroll.viewport().installEventFilter(self)
+        self.tab_strip_scroll.horizontalScrollBar().valueChanged.connect(self._update_tab_scroll_buttons)
+        self.tab_strip_scroll.horizontalScrollBar().rangeChanged.connect(self._update_tab_scroll_buttons)
+        self.tabs.currentChanged.connect(self._on_workspace_tab_changed)
+
+        self.tab_scroll_right = QToolButton()
+        self.tab_scroll_right.setObjectName("workspaceTabArrow")
+        self.tab_scroll_right.setFixedSize(44, 44)
+        self.tab_scroll_right.setToolTip("Scroll tabs right")
+        self.tab_scroll_right.clicked.connect(lambda: self._scroll_tabs(1))
+        navigation_layout.addWidget(self.tab_scroll_right)
+
+        for form in (colors_layout, error_map_form, preview_colour_form, preview_axes_form, preview_legend_form,
+                     voxel_fields, zscore_layout, sor_layout, bbox_layout, manual_form,
+                     icp_layout, legacy_global_layout, auto_layout, comparison_layout, export_options_layout):
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            form.setVerticalSpacing(3)
+            form.setHorizontalSpacing(10)
+        for combo in self.tabs.findChildren(QComboBox):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(12)
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for spin in self.tabs.findChildren(QSpinBox) + self.tabs.findChildren(QDoubleSpinBox):
+            spin.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        for label in self.tabs.findChildren(QLabel):
+            if label.text():
+                label.setWordWrap(True)
+
         tools_heading = QLabel("Workspace tools")
         tools_heading.setObjectName("sectionHeading")
-        tools_hint = QLabel("Choose a step for the selected point cloud")
-        tools_hint.setObjectName("sectionHint")
         layout.addWidget(tools_heading)
-        layout.addWidget(tools_hint)
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tab_navigation)
+        layout.addWidget(self.tabs, 1)
         self.setLayout(layout)
         
         # Group parts that require selection
         self.requires_selection_widgets = [
-            colors_group, analysis_display_group, camera_group, voxel_group, outlier_group,
-            self.btn_save_data, self.btn_centre_data, manual_group, icp_group, legacy_global_group, auto_group, comparison_group
+            colors_group, analysis_display_group, self.camera_group, voxel_group, outlier_group,
+            manual_group, icp_group, legacy_global_group, auto_group, comparison_group
         ]
         self._enable_selection_widgets(False)
+        self.set_icon_color("#526174")
 
     def take_dataset_browser(self):
         """Detach the project and dataset list so the main window can place it in its own sidebar."""
@@ -914,6 +1258,91 @@ class ControlPanel(QWidget):
             layout.removeWidget(self.dataset_group)
         self.dataset_group.setParent(None)
         return self.dataset_group
+
+    def take_camera_controls(self):
+        """Detach camera controls so the main window can place them below the cloud list."""
+        self.camera_group.setParent(None)
+        return self.camera_group
+
+    def set_language(self, language: str):
+        """Keep generated camera transform labels in step with the selected language."""
+        self.language = language
+        self._refresh_distance_unit_labels()
+        self._sync_tab_strip()
+        QTimer.singleShot(0, self._sync_tab_strip)
+
+    def eventFilter(self, watched, event):
+        if (hasattr(self, "tab_strip_scroll") and watched is self.tab_strip_scroll.viewport()
+                and event.type() == QEvent.Type.Resize):
+            QTimer.singleShot(0, self._sync_tab_strip)
+        return super().eventFilter(watched, event)
+
+    def _sync_tab_strip(self):
+        self.tab_strip_widget.adjustSize()
+        self._ensure_tab_visible(self.tabs.currentIndex())
+        self._update_tab_scroll_buttons()
+
+    def _ensure_tab_visible(self, index: int):
+        if not 0 <= index < len(self.tab_buttons):
+            return
+        button = self.tab_buttons[index]
+        scrollbar = self.tab_strip_scroll.horizontalScrollBar()
+        view_width = self.tab_strip_scroll.viewport().width()
+        if button.x() < scrollbar.value():
+            scrollbar.setValue(max(0, button.x() - 4))
+        elif button.x() + button.width() > scrollbar.value() + view_width:
+            scrollbar.setValue(button.x() + button.width() - view_width + 4)
+
+    def _on_workspace_tab_changed(self, index: int):
+        if 0 <= index < len(self.tab_buttons):
+            self.tab_buttons[index].setChecked(True)
+            self._ensure_tab_visible(index)
+
+    def _scroll_tabs(self, direction: int):
+        scrollbar = self.tab_strip_scroll.horizontalScrollBar()
+        step = max(120, self.tab_strip_scroll.viewport().width() // 2)
+        scrollbar.setValue(scrollbar.value() + direction * step)
+
+    def _update_tab_scroll_buttons(self, *_):
+        if not hasattr(self, "tab_scroll_right"):
+            return
+        scrollbar = self.tab_strip_scroll.horizontalScrollBar()
+        self.tab_scroll_left.setEnabled(scrollbar.value() > scrollbar.minimum())
+        self.tab_scroll_right.setEnabled(scrollbar.value() < scrollbar.maximum())
+
+    def set_icon_color(self, color: str):
+        """Refresh the monochrome icons for the active light or dark palette."""
+        for button, name in (
+            (self.btn_add, "plus"), (self.btn_remove, "trash"),
+            (self.btn_move_up, "up"), (self.btn_move_down, "down"),
+        ):
+            button.setIcon(monochrome_icon(name, color))
+            button.setIconSize(QSize(18, 18))
+        for index, name in enumerate(self.tab_icons):
+            self.tabs.setTabIcon(index, monochrome_icon(name, color))
+            self.tab_buttons[index].setIcon(monochrome_icon(name, color))
+        for button, name in ((self.tab_scroll_left, "chevron_left"),
+                             (self.tab_scroll_right, "chevron_right")):
+            button.setIcon(monochrome_icon(name, color))
+            button.setIconSize(QSize(20, 20))
+        for label, name in self.section_icons:
+            label.setPixmap(monochrome_icon(name, color).pixmap(20, 20))
+        for button, name in (
+            (self.btn_preset_save, "save"), (self.btn_preset_rename, "edit"),
+            (self.btn_preset_delete, "trash"),
+            (self.btn_use_preview_settings, "preview"),
+            (self.btn_apply_transform, "align"), (self.btn_run_icp, "align"),
+            (self.btn_run_legacy_global_alignment, "align"), (self.btn_run_auto_alignment, "align"),
+            (self.btn_calculate_error, "evaluate"), (self.btn_comparison_report, "evaluate"),
+            (self.btn_preview_export, "preview"), (self.btn_export_configured, "export_display"),
+            (self.btn_export_configured_full, "export_full"),
+            (self.btn_new_export_profile, "plus"), (self.btn_rename_export_profile, "edit"),
+            (self.btn_delete_export_profile, "trash"), (self.btn_import_export_profile, "folder"),
+        ):
+            button.setIcon(monochrome_icon(name, color))
+
+    def _on_alignment_method_changed(self, index: int):
+        self.method_pages.setCurrentIndex((0, 1, 1, 2)[index] if 0 <= index < 4 else 0)
         
     def _enable_selection_widgets(self, enable: bool):
         for w in self.requires_selection_widgets:
@@ -997,7 +1426,10 @@ class ControlPanel(QWidget):
         self._update_error_controls()
             
     def add_dataset_to_list(self, name: str, checked: bool = True):
-        item = QListWidgetItem(name)
+        display_name = os.path.splitext(name)[0]
+        item = QListWidgetItem(display_name)
+        item.setData(Qt.ItemDataRole.UserRole, name)
+        item.setToolTip(name)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
         self.dataset_list.addItem(item)
@@ -1006,18 +1438,25 @@ class ControlPanel(QWidget):
         # Update target combo
         self.icp_target_combo.addItem(name)
         self.legacy_global_target_combo.addItem(name)
+        self.auto_source_combo.addItem(name)
         self.auto_target_combo.addItem(name)
         self.comparison_source_combo.addItem(name)
         self.comparison_target_combo.addItem(name)
+        self.auto_source_combo.setCurrentIndex(self.auto_source_combo.count() - 1)
+        if self.auto_source_combo.count() > 1 and self.auto_target_combo.currentIndex() == self.auto_source_combo.currentIndex():
+            self.auto_target_combo.setCurrentIndex(0)
         self._sync_comparison_selectors(source_changed=True)
         
     def remove_dataset_from_list(self, idx: int):
         self.dataset_list.takeItem(idx)
         self.icp_target_combo.removeItem(idx)
         self.legacy_global_target_combo.removeItem(idx)
+        self.auto_source_combo.removeItem(idx)
         self.auto_target_combo.removeItem(idx)
         self.comparison_source_combo.removeItem(idx)
         self.comparison_target_combo.removeItem(idx)
+        if self.auto_source_combo.count() > 1 and self.auto_source_combo.currentIndex() == self.auto_target_combo.currentIndex():
+            self.auto_target_combo.setCurrentIndex(0 if self.auto_source_combo.currentIndex() != 0 else 1)
         self._sync_comparison_selectors(source_changed=True)
 
     def move_dataset_in_list(self, old_idx: int, new_idx: int):
@@ -1029,6 +1468,7 @@ class ControlPanel(QWidget):
         for combo in (
             self.icp_target_combo,
             self.legacy_global_target_combo,
+            self.auto_source_combo,
             self.auto_target_combo,
             self.comparison_source_combo,
             self.comparison_target_combo,
@@ -1118,9 +1558,10 @@ class ControlPanel(QWidget):
 
     def _refresh_distance_unit_labels(self):
         unit = self._distance_unit()
-        self.tx_label.setText(f"Translate X ({unit}):")
-        self.ty_label.setText(f"Translate Y ({unit}):")
-        self.tz_label.setText(f"Translate Z ({unit}):")
+        prefix = "Verschiebung" if self.language == "de" else "Translate"
+        self.tx_label.setText(f"{prefix} X ({unit}):")
+        self.ty_label.setText(f"{prefix} Y ({unit}):")
+        self.tz_label.setText(f"{prefix} Z ({unit}):")
         self.voxel_spin.setToolTip(
             f"Size of the voxel grid cell in {unit}. Auto-calculated on load based on dataset bounds."
         )
@@ -1168,6 +1609,115 @@ class ControlPanel(QWidget):
         if filepath:
             self.export_configured_requested.emit(filepath, full_resolution)
 
+    def _emit_preview_plot_settings_changed(self, *_):
+        if not self._loading_preview_plot_settings:
+            self.preview_plot_settings_changed.emit(self.get_preview_plot_settings())
+
+    def get_preview_plot_settings(self) -> dict:
+        labels = {}
+        sequential_labels = []
+        for line in self.preview_legend_labels.toPlainText().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "=" in line:
+                source, label = (part.strip() for part in line.split("=", 1))
+                if source and label:
+                    labels[source] = label
+            else:
+                sequential_labels.append(line)
+        return {
+            "use_heatmap": self.preview_use_heatmap_check.isChecked(),
+            "use_heightmap": self.preview_use_heightmap_check.isChecked(),
+            "heatmap_colormap": self.preview_heatmap_colormap_combo.currentData(),
+            "heightmap_colormap": self.preview_heightmap_colormap_combo.currentText(),
+            "colourbar_height": self.preview_colourbar_height_spin.value(),
+            "colourbar_decimals": self.preview_colourbar_decimals_spin.value(),
+            "colourbar_label": self.preview_colourbar_label.toPlainText(),
+            "colourbar_label_font_size": self.preview_colourbar_label_font_size_spin.value(),
+            "colourbar_tick_font_size": self.preview_colourbar_tick_font_size_spin.value(),
+            "axis_label_font_size": self.preview_axis_label_font_size_spin.value(),
+            "axis_tick_font_size": self.preview_axis_tick_font_size_spin.value(),
+            "z_axis_label_spacing": self.preview_z_label_spacing_spin.value(),
+            "z_axis_tick_label_gap": self.preview_z_tick_label_gap_spin.value(),
+            "z_axis_ticks": self.preview_z_ticks_spin.value(),
+            "z_axis_tick_interval": self.preview_z_tick_interval_spin.value(),
+            "point_size": self.preview_point_size_spin.value(),
+            "x_label": self.preview_x_axis_name.text() or "X",
+            "y_label": self.preview_y_axis_name.text() or "Y",
+            "z_label": self.preview_z_axis_name.text() or "Z",
+            "show_legend": self.preview_show_legend_check.isChecked(),
+            "legend_point_size": self.preview_legend_point_size_spin.value(),
+            "legend_placement": self.preview_legend_placement_combo.currentData(),
+            "legend_position": self.preview_legend_position_combo.currentData(),
+            "legend_title": self.preview_legend_title.text(),
+            "legend_labels": labels,
+            "legend_labels_text": self.preview_legend_labels.toPlainText(),
+            "legend_label_lines": sequential_labels,
+        }
+
+    def load_preview_plot_settings(self, options):
+        if not isinstance(options, dict):
+            options = {}
+        fields = list(self.preview_plot_fields.values())
+        previous_blocks = [field.blockSignals(True) for field in fields]
+        self._loading_preview_plot_settings = True
+        try:
+            self.preview_use_heatmap_check.setChecked(bool(options.get("use_heatmap", True)))
+            self.preview_use_heightmap_check.setChecked(bool(options.get("use_heightmap", False)))
+            index = self.preview_heatmap_colormap_combo.findData(options.get("heatmap_colormap", "auto"))
+            self.preview_heatmap_colormap_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.preview_heightmap_colormap_combo.setCurrentText(options.get("heightmap_colormap", "viridis"))
+            self.preview_colourbar_height_spin.setValue(float(options.get("colourbar_height", 1.0)))
+            self.preview_colourbar_decimals_spin.setValue(int(options.get("colourbar_decimals", 2)))
+            self.preview_colourbar_label.setPlainText(options.get("colourbar_label", ""))
+            for name in ("axis_label", "axis_tick", "colourbar_label", "colourbar_tick"):
+                getattr(self, f"preview_{name}_font_size_spin").setValue(
+                    float(options.get(f"{name}_font_size", 10.0))
+                )
+            self.preview_point_size_spin.setValue(float(options.get("point_size", 10.0)))
+            self.preview_x_axis_name.setText(options.get("x_label", "X"))
+            self.preview_y_axis_name.setText(options.get("y_label", "Y"))
+            self.preview_z_axis_name.setText(options.get("z_label", "Z"))
+            self.preview_z_label_spacing_spin.setValue(float(options.get("z_axis_label_spacing", 0.0)))
+            self.preview_z_tick_label_gap_spin.setValue(float(options.get("z_axis_tick_label_gap", 0.0)))
+            self.preview_z_ticks_spin.setValue(int(options.get("z_axis_ticks", 0)))
+            self.preview_z_tick_interval_spin.setValue(float(options.get("z_axis_tick_interval", 0.0)))
+            self.preview_z_ticks_spin.setEnabled(self.preview_z_tick_interval_spin.value() == 0)
+            self.preview_show_legend_check.setChecked(bool(options.get("show_legend", True)))
+            self.preview_legend_point_size_spin.setValue(float(options.get("legend_point_size", 16.0)))
+            for key, combo in (("legend_placement", self.preview_legend_placement_combo),
+                               ("legend_position", self.preview_legend_position_combo)):
+                index = combo.findData(options.get(key))
+                combo.setCurrentIndex(index if index >= 0 else 0)
+            self.preview_legend_title.setText(options.get("legend_title", ""))
+            if isinstance(options.get("legend_labels_text"), str):
+                self.preview_legend_labels.setPlainText(options["legend_labels_text"])
+            elif isinstance(options.get("legend_label_lines"), list):
+                self.preview_legend_labels.setPlainText("\n".join(map(str, options["legend_label_lines"])))
+            else:
+                labels = options.get("legend_labels", {})
+                if isinstance(labels, dict):
+                    self.preview_legend_labels.setPlainText(
+                        "\n".join(f"{name} = {label}" for name, label in labels.items())
+                    )
+        finally:
+            self._loading_preview_plot_settings = False
+            for field, blocked in zip(fields, previous_blocks):
+                field.blockSignals(blocked)
+
+    def _copy_preview_settings_to_export(self):
+        options = self.get_preview_plot_settings()
+        self._loading_export_profile = True
+        try:
+            self.apply_export_options(options)
+        finally:
+            self._loading_export_profile = False
+        active_name = self.export_profile_combo.currentData()
+        if active_name in self.export_profiles:
+            self.export_profiles[active_name] = deepcopy(self.get_export_options())
+        self.export_profiles_changed.emit()
+
     def get_export_options(self) -> dict:
         labels = {}
         sequential_labels = []
@@ -1182,7 +1732,7 @@ class ControlPanel(QWidget):
             else:
                 sequential_labels.append(line)
         visible_names = [
-            self.dataset_list.item(index).text()
+            self.dataset_list.item(index).data(Qt.ItemDataRole.UserRole)
             for index in range(self.dataset_list.count())
             if self.dataset_list.item(index).checkState() == Qt.CheckState.Checked
         ]
@@ -1221,6 +1771,236 @@ class ControlPanel(QWidget):
             # saved settings files remain compatible.
             "legend_label_lines": sequential_labels,
         }
+
+    def _profile_button(self, icon_name: str, tooltip: str, callback) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("exportProfileAction")
+        button.setToolTip(tooltip)
+        button.setIcon(monochrome_icon(icon_name, "#526174"))
+        button.setIconSize(QSize(17, 17))
+        button.setFixedSize(34, 34)
+        button.clicked.connect(callback)
+        return button
+
+    def _connect_export_profile_fields(self):
+        fields = (
+            self.export_heatmap_check, self.export_heightmap_check,
+            self.export_heatmap_colormap_combo, self.export_heightmap_colormap_combo,
+            self.export_colourbar_height_spin, self.export_colourbar_decimals_spin,
+            self.export_colourbar_label, self.export_colourbar_label_font_size_spin,
+            self.export_colourbar_tick_font_size_spin, self.export_axis_label_font_size_spin,
+            self.export_axis_tick_font_size_spin, self.export_z_label_spacing_spin,
+            self.export_z_tick_label_gap_spin, self.export_z_ticks_spin,
+            self.export_z_tick_interval_spin, self.export_point_size_spin,
+            self.export_x_axis_name, self.export_y_axis_name, self.export_z_axis_name,
+            self.export_show_legend_check, self.export_legend_point_size_spin,
+            self.export_legend_placement_combo, self.export_legend_position_combo,
+            self.export_legend_title, self.export_legend_labels,
+        )
+        for field in fields:
+            if isinstance(field, QCheckBox):
+                field.toggled.connect(self._on_export_profile_field_changed)
+            elif isinstance(field, QComboBox):
+                field.currentIndexChanged.connect(self._on_export_profile_field_changed)
+            elif isinstance(field, (QSpinBox, QDoubleSpinBox)):
+                field.valueChanged.connect(self._on_export_profile_field_changed)
+            elif isinstance(field, QLineEdit):
+                field.textChanged.connect(self._on_export_profile_field_changed)
+            elif isinstance(field, QTextEdit):
+                field.textChanged.connect(self._on_export_profile_field_changed)
+
+    def _on_export_profile_field_changed(self, *_):
+        if self._loading_export_profile:
+            return
+        name = self.export_profile_combo.currentData()
+        if name in self.export_profiles:
+            self.export_profiles[name] = deepcopy(self.get_export_options())
+            self.export_profiles_changed.emit()
+
+    def _on_export_profile_selected(self, index: int):
+        if self._loading_export_profile or index < 0:
+            return
+        name = self.export_profile_combo.itemData(index)
+        options = self.export_profiles.get(name)
+        if not isinstance(options, dict):
+            return
+        self._loading_export_profile = True
+        try:
+            self.apply_export_options(options)
+        finally:
+            self._loading_export_profile = False
+        self._update_export_profile_buttons()
+        self.export_profiles_changed.emit()
+
+    def _update_export_profile_buttons(self):
+        if hasattr(self, "btn_delete_export_profile"):
+            self.btn_delete_export_profile.setEnabled(len(self.export_profiles) > 1)
+
+    def _profile_text(self, english: str, german: str) -> str:
+        return german if self.language == "de" else english
+
+    def _new_export_profile(self):
+        default_name = self._profile_text("New profile", "Neues Profil")
+        name, accepted = QInputDialog.getText(
+            self, self._profile_text("New export profile", "Neues Exportprofil"),
+            self._profile_text("Profile name:", "Profilname:"), text=default_name,
+        )
+        name = name.strip()
+        if not accepted or not name:
+            return
+        if name in self.export_profiles:
+            QMessageBox.information(
+                self, self._profile_text("Export profiles", "Exportprofile"),
+                self._profile_text("A profile with this name already exists.", "Ein Profil mit diesem Namen existiert bereits."),
+            )
+            return
+        self.export_profiles[name] = deepcopy(self.get_export_options())
+        self.export_profile_combo.addItem(name, name)
+        self.export_profile_combo.setCurrentIndex(self.export_profile_combo.count() - 1)
+
+    def _rename_export_profile(self):
+        old_name = self.export_profile_combo.currentData()
+        if old_name not in self.export_profiles:
+            return
+        new_name, accepted = QInputDialog.getText(
+            self, self._profile_text("Rename export profile", "Exportprofil umbenennen"),
+            self._profile_text("Profile name:", "Profilname:"), text=old_name,
+        )
+        new_name = new_name.strip()
+        if not accepted or not new_name or new_name == old_name:
+            return
+        if new_name in self.export_profiles:
+            QMessageBox.information(
+                self, self._profile_text("Export profiles", "Exportprofile"),
+                self._profile_text("A profile with this name already exists.", "Ein Profil mit diesem Namen existiert bereits."),
+            )
+            return
+        self.export_profiles[new_name] = self.export_profiles.pop(old_name)
+        index = self.export_profile_combo.currentIndex()
+        self.export_profile_combo.setItemText(index, new_name)
+        self.export_profile_combo.setItemData(index, new_name)
+        self.export_profiles_changed.emit()
+
+    def _delete_export_profile(self):
+        name = self.export_profile_combo.currentData()
+        if len(self.export_profiles) < 2 or name not in self.export_profiles:
+            return
+        self.export_profiles.pop(name)
+        self.export_profile_combo.removeItem(self.export_profile_combo.currentIndex())
+        self._update_export_profile_buttons()
+        self.export_profiles_changed.emit()
+
+    def _import_export_profile(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, self._profile_text("Import profile or export settings", "Profil oder Exporteinstellungen importieren"),
+            "", self._profile_text("JSON Files (*.json);;All Files (*)", "JSON-Dateien (*.json);;Alle Dateien (*)")
+        )
+        if not filepath:
+            return
+        try:
+            with open(filepath, encoding="utf-8") as source:
+                source_data = json.load(source)
+            if not isinstance(source_data, dict):
+                raise ValueError(self._profile_text(
+                    "The selected file is not a project or export settings file.",
+                    "Die Datei enthält weder ein Projekt noch Exporteinstellungen."
+                ))
+
+            profile_data = source_data.get("export_profiles", {})
+            source_profiles = profile_data.get("profiles", {}) if isinstance(profile_data, dict) else {}
+            valid_profiles = {
+                str(name): options for name, options in source_profiles.items()
+                if isinstance(name, str) and isinstance(options, dict)
+            } if isinstance(source_profiles, dict) else {}
+
+            if not valid_profiles:
+                # Older versions exported one profile as a plain JSON object.
+                option_keys = {
+                    "use_heatmap", "use_heightmap", "heatmap_colormap", "heightmap_colormap",
+                    "colourbar_height", "colourbar_decimals", "colourbar_label",
+                    "colourbar_label_font_size", "colourbar_tick_font_size",
+                    "axis_label_font_size", "axis_tick_font_size", "z_axis_label_spacing",
+                    "z_axis_tick_label_gap", "z_axis_ticks", "z_axis_tick_interval",
+                    "point_size", "x_label", "y_label", "z_label", "show_legend",
+                    "legend_point_size", "legend_placement", "legend_position",
+                    "legend_title", "legend_labels", "legend_labels_text",
+                    "legend_label_lines", "z_axis_max_ticks",
+                }
+                if option_keys.intersection(source_data):
+                    legacy_name = os.path.splitext(os.path.basename(filepath))[0]
+                    valid_profiles = {legacy_name: source_data}
+
+            if not valid_profiles:
+                QMessageBox.information(
+                    self, self._profile_text("No export settings", "Keine Exporteinstellungen"),
+                    self._profile_text(
+                        "This file does not contain any export profiles or legacy export settings.",
+                        "Diese Datei enthält weder Exportprofile noch ältere Exporteinstellungen."
+                    ),
+                )
+                return
+            source_name, accepted = QInputDialog.getItem(
+                self, self._profile_text("Import export profile", "Exportprofil importieren"),
+                self._profile_text("Choose a profile:", "Profil auswählen:"), list(valid_profiles), 0, False
+            )
+            if not accepted:
+                return
+            profile_name, accepted = QInputDialog.getText(
+                self, self._profile_text("Add export profile", "Exportprofil hinzufügen"),
+                self._profile_text("Name in this project:", "Name in diesem Projekt:"), text=source_name,
+            )
+            profile_name = profile_name.strip()
+            if not accepted or not profile_name:
+                return
+            if profile_name in self.export_profiles:
+                QMessageBox.information(
+                    self, self._profile_text("Export profiles", "Exportprofile"),
+                    self._profile_text("A profile with this name already exists.", "Ein Profil mit diesem Namen existiert bereits."),
+                )
+                return
+            self.export_profiles[profile_name] = deepcopy(valid_profiles[source_name])
+            self.export_profile_combo.addItem(profile_name, profile_name)
+            self.export_profile_combo.setCurrentIndex(self.export_profile_combo.count() - 1)
+            self.export_profiles_changed.emit()
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            QMessageBox.critical(
+                self, self._profile_text("Export settings import error", "Fehler beim Import der Exporteinstellungen"),
+                str(error),
+            )
+    def export_profiles_data(self) -> dict:
+        active_name = self.export_profile_combo.currentData()
+        if active_name in self.export_profiles:
+            self.export_profiles[active_name] = deepcopy(self.get_export_options())
+        return {
+            "schema_version": 1,
+            "active_profile": active_name or "Default",
+            "profiles": deepcopy(self.export_profiles),
+        }
+
+    def load_export_profiles(self, profile_data):
+        profiles = profile_data.get("profiles", {}) if isinstance(profile_data, dict) else {}
+        valid_profiles = {
+            str(name): deepcopy(options) for name, options in profiles.items()
+            if isinstance(name, str) and isinstance(options, dict)
+        } if isinstance(profiles, dict) else {}
+        if not valid_profiles:
+            valid_profiles = {"Default": deepcopy(self._default_export_options)}
+        active_name = profile_data.get("active_profile") if isinstance(profile_data, dict) else None
+        if active_name not in valid_profiles:
+            active_name = next(iter(valid_profiles))
+        self._loading_export_profile = True
+        self.export_profile_combo.blockSignals(True)
+        try:
+            self.export_profiles = valid_profiles
+            self.export_profile_combo.clear()
+            for name in valid_profiles:
+                self.export_profile_combo.addItem(name, name)
+            self.export_profile_combo.setCurrentIndex(self.export_profile_combo.findData(active_name))
+            self.apply_export_options(valid_profiles[active_name])
+        finally:
+            self.export_profile_combo.blockSignals(False)
+            self._loading_export_profile = False
+        self._update_export_profile_buttons()
 
     def apply_export_options(self, options: dict):
         """Load a previously saved export appearance without changing data settings."""
@@ -1275,42 +2055,11 @@ class ControlPanel(QWidget):
                     "\n".join(f"{name} = {label}" for name, label in labels.items())
                 )
 
-    def _on_save_export_settings_clicked(self):
-        import json
-
-        filepath, _ = QFileDialog.getSaveFileName(
-            self, "Save Export Settings", "", "Export Settings (*.json);;All Files (*)"
-        )
-        if not filepath:
-            return
-        try:
-            with open(filepath, "w", encoding="utf-8") as output:
-                json.dump(self.get_export_options(), output, indent=2)
-        except OSError as error:
-            QMessageBox.critical(self, "Save Export Settings Error", str(error))
-
-    def _on_load_export_settings_clicked(self):
-        import json
-
-        filepath, _ = QFileDialog.getOpenFileName(
-            self, "Load Export Settings", "", "Export Settings (*.json);;All Files (*)"
-        )
-        if not filepath:
-            return
-        try:
-            with open(filepath, encoding="utf-8") as source:
-                options = json.load(source)
-            if not isinstance(options, dict):
-                raise ValueError("The selected file does not contain export settings.")
-            self.apply_export_options(options)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            QMessageBox.critical(self, "Load Export Settings Error", str(error))
-            
     def _on_run_icp_clicked(self):
         source_idx = self.dataset_list.currentRow()
         target_idx = self.icp_target_combo.currentIndex()
         if source_idx >= 0 and target_idx >= 0 and source_idx != target_idx:
-            self.run_icp_requested.emit(source_idx, target_idx, self.icp_distance_spin.value(), self.icp_method_combo.currentText())
+            self.run_icp_requested.emit(source_idx, target_idx, self.icp_distance_spin.value(), self.alignment_method_combo.currentData())
 
     def _on_run_legacy_global_alignment_clicked(self):
         source_idx = self.dataset_list.currentRow()
@@ -1323,7 +2072,7 @@ class ControlPanel(QWidget):
             )
 
     def _on_run_auto_alignment_clicked(self):
-        source_idx = self.dataset_list.currentRow()
+        source_idx = self.auto_source_combo.currentIndex()
         target_idx = self.auto_target_combo.currentIndex()
         if source_idx >= 0 and target_idx >= 0 and source_idx != target_idx:
             self.run_auto_alignment_requested.emit(
@@ -1565,6 +2314,12 @@ class ControlPanel(QWidget):
             
         self.blockSignals(False)
         self._refresh_distance_unit_labels()
+        self.voxel_spin.setEnabled(self.voxel_check.isChecked())
+        self.zscore_spin.setEnabled(self.zscore_check.isChecked())
+        self.sor_k_spin.setEnabled(self.sor_check.isChecked())
+        self.sor_std_spin.setEnabled(self.sor_check.isChecked())
+        self.bbox_zmin.setEnabled(self.bbox_check.isChecked())
+        self.bbox_zmax.setEnabled(self.bbox_check.isChecked())
         
     def get_current_settings(self) -> dict:
         current_preset = self.preset_combo.currentText()

@@ -1,17 +1,18 @@
-# 3D Point Cloud Data Viewer (spp2433_journal_evaluation)
+# SPP 2433 - Point Cloud Evaluation (spp2433_journal_evaluation)
 
 A fast, local Python desktop application built with **PyQt6** and **matplotlib** to evaluate, filter, and visualize dense 3D surface scan data from CSV files.
 
 ## Features
 
 - **Persistent workspace**: Keep projects and datasets in a left sidebar, the interactive 3-D view in the centre, and contextual Data, Prepare, Align, Evaluate, and Export tools on the right. Direct navigation does not enforce a fixed workflow.
-- **Light and dark themes**: Start with the light theme or switch to dark from the toolbar. The choice is saved in the per-user application settings.
+- **Light and dark themes and English/German UI**: Switch themes with the sun/moon toolbar icons and language with the DE/EN controls. Preferences are saved in the per-user application settings.
 - **Standalone Windows release**: Build a versioned EXE with `tools/build_windows_exe.ps1`; publishing a GitHub Release triggers the Windows build and attaches the executable. See [Windows partner release](docs/windows-release.md) and the [feature navigation map](docs/feature-navigation.md).
-- **Application Icon**: A blue-white-red point-cloud icon appears in the title bar and running application's Windows taskbar button. Restart the application after updating. Assets are in `src/assets/app_icon.{svg,png,ico}`; rebuild them with `pixi run python tools/generate_app_icon.py`. The ICO includes sizes from 16 to 256 pixels. Windows startup sets the dedicated identity `SPP2433.PointCloudEvaluation` before creating the UI.
+- **Application branding**: The SPP logo and “SPP 2433 - Point Cloud Evaluation” name appear in the header and application icon. The icon assets in `src/assets/app_icon.{svg,png,ico}` are generated from `src/assets/brand_logo.svg` with `pixi run python tools/generate_app_icon.py`. The ICO includes sizes from 16 to 256 pixels. Windows startup sets the dedicated identity `SPP2433.GroupAVisualizer` before creating the UI.
 - **Robust CSV Parsing**: Dynamically detects `X`, `Y`, and `Z` coordinates regardless of capitalization, and automatically ignores comment blocks like `//` in the headers. Retains extra columns (Intensity, Return Number, etc.) for visualization.
 - **Smart Filtering & Downsampling**: Includes intuitive sliders to decimate the point cloud (e.g., keep 1 in every 10 points) or take a random percentage sample to keep the application responsive with massive datasets.
 - **Caching Mechanism**: Save your filtered datasets locally. The app will automatically detect optimized datasets the next time you load the original file, saving significant loading time.
 - **Project Toolbar & Safe Saving**: Icon actions provide Open, Open Project, Save, Save As, conversion, reference selection, and recent projects. Projects preserve cloud order and visibility; Save writes to the open project, while Save As creates a separate backup. Unsaved changes are flagged and confirmed on close.
+- **Self-contained project settings**: A project JSON stores each cloud's filters and transforms, visibility and alignment data, preview-plot settings, and named export profiles. Point-cloud files remain external and are referenced by path. Older projects still load: when a cloud has no embedded settings, the app reads its legacy `filtered/<name>_config.json` sidecar and includes those settings the next time the project is saved. The Export Profiles import button accepts profiles from another project and legacy standalone export-settings JSON files.
 - **Pixel Coordinate Conversion**: The top-bar **Convert pixel coordinates to mm** action creates a new CSV copy of the selected raw cloud. Enter pixels per millimetre (for example, `2.1`); X and Y are divided by that value. Z is unchanged by default and can be included only when it is also in pixels. The original cloud is hidden and the converted copy is loaded automatically.
 - **3D Visualization**: Render points in an interactive 3D space. Apply dynamic color mapping using any of the additional columns in your dataset.
 - **Stable Inspection View**: Keep the current 3-D camera orientation, zoom, and pan while applying manual transforms or refreshing the plot.

@@ -7,8 +7,8 @@ def main():
     set_windows_app_id()
     app = QApplication(sys.argv)
     app.setOrganizationName("SPP2433")
-    app.setApplicationName("PointCloudEvaluation")
-    app.setApplicationDisplayName("Point Cloud Evaluation")
+    app.setApplicationName("SPP2433PointCloudEvaluation")
+    app.setApplicationDisplayName("SPP 2433 - Point Cloud Evaluation")
     app.setWindowIcon(application_icon())
     app.setStyle("Fusion")
     

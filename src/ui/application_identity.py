@@ -6,7 +6,7 @@ from pathlib import Path
 from PyQt6.QtGui import QIcon
 
 
-WINDOWS_APP_ID = "SPP2433.PointCloudEvaluation"
+WINDOWS_APP_ID = "SPP2433.GroupAVisualizer"
 ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "app_icon.ico"
 
 

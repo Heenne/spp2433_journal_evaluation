@@ -10,11 +10,27 @@ from src.utils.registration import (
     automatic_registration,
     calculate_cloud_error,
     global_automatic_registration,
+    run_icp,
     transform_points,
 )
 
 
 class LocalFineAlignmentTests(unittest.TestCase):
+    def test_icp_methods_recover_a_known_translation(self):
+        points = np.random.default_rng(4).uniform(-1.0, 1.0, (300, 3))
+        translation = np.array([0.1, -0.05, 0.02])
+        source = self._frame(points)
+        target = self._frame(points + translation)
+
+        for method in ("Standard ICP", "Robust ICP (Partial Overlap)"):
+            with self.subTest(method=method):
+                pose, fitness = run_icp(
+                    source, target, max_correspondence_distance=0.5, method=method
+                )
+                np.testing.assert_allclose(pose[:3], translation, atol=1e-4)
+                np.testing.assert_allclose(pose[3:], 0.0, atol=1e-4)
+                self.assertGreater(fitness, 0.99)
+
     @staticmethod
     def _source_cloud():
         """Make an asymmetric curved surface far from the world origin."""
