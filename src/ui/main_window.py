@@ -8,8 +8,8 @@ from PyQt6.QtWidgets import (
     QToolBar, QToolButton, QDialog, QLabel, QDialogButtonBox,
     QFormLayout, QDoubleSpinBox, QCheckBox, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QSize, QRect, QTimer
-from PyQt6.QtGui import QAction, QPixmap, QCursor, QGuiApplication
+from PyQt6.QtCore import Qt, QSize, QRect, QPoint, QTimer, QUrl
+from PyQt6.QtGui import QAction, QPixmap, QCursor, QGuiApplication, QDesktopServices
 from src.ui.plot_canvas import PlotCanvas
 from src.ui.control_panel import ControlPanel
 from src.data.parser import parse_point_cloud_file
@@ -29,13 +29,17 @@ from src.utils.error_mapping import error_map_colours
 from src.utils.error_report import update_report_metrics, interval, number
 from src.ui.error_report_dialog import ErrorReportDialog
 from src.ui.application_identity import application_icon
-from src.ui.icons import monochrome_icon
+from src.ui.icons import monochrome_icon, github_icon
 from src.ui.i18n import apply_language
+from src.ui.new_user_guide import NewUserGuideDialog
 from src.ui.theme import apply_theme
 from src.utils.app_settings import load_app_settings, save_app_settings
 from src.utils.export_layout import layout_export_z_axis
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.colors import LinearSegmentedColormap
+
+
+STARTUP_GUIDE_VERSION = 2
 
 
 class PointCloudNavigationToolbar(NavigationToolbar):
@@ -90,6 +94,7 @@ class MainWindow(QMainWindow):
         
         self.init_ui()
         self._place_initial_window()
+        QTimer.singleShot(250, self._show_new_user_guide_on_first_run)
 
     @staticmethod
     def _initial_geometry(available: QRect) -> QRect:
@@ -260,6 +265,41 @@ class MainWindow(QMainWindow):
             button.setFixedSize(38, 38)
             choices_layout.addWidget(button)
             self.language_actions[code.lower()] = action
+        self.documentation_action = toolbar_action(
+            monochrome_icon("help", self._icon_color), "Documentation",
+            lambda: QDesktopServices.openUrl(QUrl(
+                "https://github.com/Heenne/spp2433_journal_evaluation/blob/main/docs/user-guide.md"
+            )),
+            add=False,
+        )
+        self.new_user_guide_action = toolbar_action(
+            monochrome_icon("help", self._icon_color), "New user guide",
+            self.start_new_user_guide, add=False,
+        )
+        choices_layout.addSpacing(5)
+        guide_button = QToolButton(choices)
+        guide_button.setObjectName("helpChoice")
+        guide_button.setDefaultAction(self.documentation_action)
+        guide_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        guide_button.setIconSize(self.open_project_button.iconSize())
+        guide_button.setFixedSize(38, 38)
+        guide_button.setMenu(QMenu(guide_button))
+        guide_button.menu().addAction(self.new_user_guide_action)
+        guide_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        guide_button.setToolTip("Documentation; open the menu for the new user guide")
+        choices_layout.addWidget(guide_button)
+        self.github_button = QToolButton(choices)
+        self.github_button.setObjectName("githubChoice")
+        self.github_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.github_button.setIcon(github_icon(self._icon_color))
+        self.github_button.setIconSize(self.open_project_button.iconSize())
+        self.github_button.setFixedSize(38, 38)
+        self.github_button.setAccessibleName("GitHub repository")
+        self.github_button.setToolTip("Open the project on GitHub")
+        self.github_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(
+            "https://github.com/Heenne/spp2433_journal_evaluation"
+        )))
+        choices_layout.addWidget(self.github_button)
         self.app_toolbar.addWidget(choices)
         
         # Central Widget
@@ -392,6 +432,9 @@ class MainWindow(QMainWindow):
             self.convert_action.setIcon(monochrome_icon("convert", self._icon_color))
             self.export_button.setIcon(monochrome_icon("export", self._icon_color))
             self.export_menu_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
+            self.documentation_action.setIcon(monochrome_icon("help", self._icon_color))
+            self.new_user_guide_action.setIcon(monochrome_icon("help", self._icon_color))
+            self.github_button.setIcon(github_icon(self._icon_color))
             for action, icon_name in (
                 (self.export_filtered_action, "cloud"),
                 (self.export_centered_action, "cloud"),
@@ -434,6 +477,56 @@ class MainWindow(QMainWindow):
 
     def _app_name(self) -> str:
         return "SPP 2433 - Punktwolkenauswertung" if self.language == "de" else "SPP 2433 - Point Cloud Evaluation"
+
+    def _show_new_user_guide_on_first_run(self):
+        settings = load_app_settings()
+        if (
+            settings.get("startup_guide_version") == STARTUP_GUIDE_VERSION
+            and settings.get("startup_guide_status") in {"completed", "skipped"}
+        ):
+            return
+        self.start_new_user_guide()
+
+    def guide_target(self, target_key: str):
+        """Return the visible widget to spotlight for a guide step."""
+        targets = {
+            "welcome": self.app_toolbar,
+            "load_cloud": self.control_panel.dataset_actions,
+            "cloud_list": self.control_panel.dataset_group,
+            "plot": self.findChild(QWidget, "pointViewer"),
+            "tools": self.control_panel.tab_navigation,
+            "save_project": self.app_toolbar,
+            "export": self.export_split_control,
+        }
+        tab_indices = {"manual_align": 3, "evaluate": 5}
+        if target_key in tab_indices:
+            index = tab_indices[target_key]
+            self.control_panel.tabs.setCurrentIndex(index)
+            button = self.control_panel.tab_buttons[index]
+            strip = self.control_panel.tab_strip_widget
+            scroll = self.control_panel.tab_strip_scroll
+            button_x = button.mapTo(strip, QPoint(0, 0)).x()
+            scrollbar = scroll.horizontalScrollBar()
+            if button_x < scrollbar.value():
+                scrollbar.setValue(button_x)
+            elif button_x + button.width() > scrollbar.value() + scroll.viewport().width():
+                scrollbar.setValue(button_x + button.width() - scroll.viewport().width())
+            return button
+        return targets.get(target_key)
+
+    def start_new_user_guide(self):
+        """Show the first-run walkthrough or reopen it from the toolbar help button."""
+        dialog = NewUserGuideDialog(self.language, self)
+        result = dialog.exec()
+        settings = load_app_settings()
+        same_version = settings.get("startup_guide_version") == STARTUP_GUIDE_VERSION
+        settings["startup_guide_version"] = STARTUP_GUIDE_VERSION
+        settings["new_user_guide_seen"] = True  # Kept for older builds that still read this key.
+        if result == QDialog.DialogCode.Accepted:
+            settings["startup_guide_status"] = "completed"
+        elif not (same_version and settings.get("startup_guide_status") == "completed"):
+            settings["startup_guide_status"] = "skipped"
+        save_app_settings(settings)
 
     def set_project_dirty(self, dirty: bool = True):
         """Track project-owned changes and expose them in the window title."""

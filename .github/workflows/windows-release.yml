@@ -25,7 +25,7 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ github.event.release.tag_name }}
-        run: .\tools\build_windows_exe.ps1 -Version $env:RELEASE_VERSION
+        run: .\tools\build_windows_exe.ps1 -Version $env:RELEASE_VERSION -CachedOneFile
 
       - name: Attach executable to GitHub Release
         env:

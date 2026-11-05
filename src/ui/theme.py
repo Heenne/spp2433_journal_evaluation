@@ -9,7 +9,7 @@ QToolBar#projectToolbar { background: #ffffff; border: 0; border-bottom: 1px sol
 QToolBar#projectToolbar::separator { width: 1px; background: #e7ebf0; margin: 6px 7px; }
 QToolBar#projectToolbar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 6px 9px; font-weight: 600; }
 QToolBar#projectToolbar QToolButton:hover, QToolBar#projectToolbar QToolButton:checked { background: #f4f6f9; }
-QToolBar#projectToolbar QToolButton#themeChoice { padding: 5px; }
+QToolBar#projectToolbar QToolButton#themeChoice, QToolBar#projectToolbar QToolButton#helpChoice, QToolBar#projectToolbar QToolButton#githubChoice { padding: 5px; }
 QToolBar#projectToolbar QToolButton#themeChoice:checked { background: #eef1f5; border-color: #d8dee7; }
 QToolBar#projectToolbar QToolButton#recentProjectsButton, QToolBar#projectToolbar QToolButton#exportMenuButton { min-width: 42px; padding: 4px; }
 QToolBar#projectToolbar QToolButton#recentProjectsButton::menu-indicator, QToolBar#projectToolbar QToolButton#exportMenuButton::menu-indicator { image: none; width: 0; }
@@ -21,6 +21,11 @@ QWidget#pointViewer { background: #ffffff; border: 0; }
 QLabel#sectionHeading, QLabel#sidebarHeading { font-size: 15px; font-weight: 700; color: #17243a; }
 QLabel#sectionHint, QLabel#sidebarHint { color: #64748b; font-size: 9pt; }
 QLabel#sidebarSubtitle { color: #64748b; font-size: 9pt; }
+QLabel#guideStepLabel { color: #0c65ae; font-size: 9pt; font-weight: 700; }
+QLabel#guideHeading { color: #17243a; font-size: 18pt; font-weight: 700; }
+QLabel#guideBody { color: #334155; font-size: 11pt; }
+QProgressBar#guideProgress { background: #e7edf3; border: 0; border-radius: 3px; }
+QProgressBar#guideProgress::chunk { background: #0c65ae; border-radius: 3px; }
 QToolBar#viewerToolbar { background: transparent; border: 0; spacing: 2px; padding: 0; }
 QToolBar#viewerToolbar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 4px; }
 QToolBar#viewerToolbar QToolButton:hover, QToolBar#viewerToolbar QToolButton:checked { background: #f1f3f6; }
@@ -141,7 +146,7 @@ QToolBar#projectToolbar { background: #17191d; border: 0; border-bottom: 1px sol
 QToolBar#projectToolbar::separator { width: 1px; background: #30343a; margin: 6px 7px; }
 QToolBar#projectToolbar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 6px 9px; font-weight: 600; }
 QToolBar#projectToolbar QToolButton:hover, QToolBar#projectToolbar QToolButton:checked { background: #24272c; }
-QToolBar#projectToolbar QToolButton#themeChoice { padding: 5px; }
+QToolBar#projectToolbar QToolButton#themeChoice, QToolBar#projectToolbar QToolButton#helpChoice, QToolBar#projectToolbar QToolButton#githubChoice { padding: 5px; }
 QToolBar#projectToolbar QToolButton#themeChoice:checked { background: #292d33; border-color: #3b4048; }
 QToolBar#projectToolbar QToolButton#recentProjectsButton, QToolBar#projectToolbar QToolButton#exportMenuButton { min-width: 42px; padding: 4px; }
 QToolBar#projectToolbar QToolButton#recentProjectsButton::menu-indicator, QToolBar#projectToolbar QToolButton#exportMenuButton::menu-indicator { image: none; width: 0; }
@@ -152,6 +157,11 @@ QWidget#datasetActions QToolButton#datasetActionButton:hover { background: #2b30
 QWidget#pointViewer { background: #17191d; border: 0; }
 QLabel#sectionHeading, QLabel#sidebarHeading { font-size: 15px; font-weight: 700; color: #f0f1f2; }
 QLabel#sectionHint, QLabel#sidebarHint, QLabel#sidebarSubtitle { color: #a3a8b0; font-size: 9pt; }
+QLabel#guideStepLabel { color: #7db9e9; font-size: 9pt; font-weight: 700; }
+QLabel#guideHeading { color: #f0f1f2; font-size: 18pt; font-weight: 700; }
+QLabel#guideBody { color: #d0d6dd; font-size: 11pt; }
+QProgressBar#guideProgress { background: #343b44; border: 0; border-radius: 3px; }
+QProgressBar#guideProgress::chunk { background: #5ba2dc; border-radius: 3px; }
 QToolBar#viewerToolbar { background: transparent; border: 0; spacing: 2px; padding: 0; }
 QToolBar#viewerToolbar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 4px; }
 QToolBar#viewerToolbar QToolButton:hover, QToolBar#viewerToolbar QToolButton:checked { background: #24272c; }

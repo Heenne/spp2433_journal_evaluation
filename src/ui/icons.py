@@ -36,11 +36,37 @@ _PATHS = {
     "preview": '<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/>',
     "export_display": '<rect x="3.5" y="4" width="17" height="15" rx="1.5"/><path d="m5 16 4.5-4.5 3.2 3.2 2.3-2.3L19 16"/>',
     "export_full": '<path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/><path d="M4 4l6 6m10-6-6 6M4 20l6-6m10 6-6-6"/>',
+    "help": '<circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.5 2.5 0 1 1 4.3 1.8c-1.1 1.1-1.9 1.4-1.9 3M12 17.5h.01"/>',
 }
+
+_GITHUB_MARK = (
+    "M12 1C5.93 1 1 5.93 1 12c0 4.87 3.16 8.99 7.55 10.44c.55.1.75-.24.75-.53"
+    " 0-.26-.01-.95-.01-1.86-3.07.66-3.71-.74-3.96-1.42-.12-.31-.66-1.42-1.13-1.71"
+    "-.39-.21-.94-.72-.01-.73.87-.01 1.49.8 1.7 1.13.99 1.66 2.58 1.19 3.21.9"
+    ".1-.72.39-1.19.7-1.46-2.77-.31-5.66-1.39-5.66-6.15 0-1.36.49-2.48"
+    "1.29-3.36-.13-.32-.56-1.6.12-3.32 0 0 1.05-.33 3.46 1.28a11.92 11.92 0 0 1"
+    "6.3 0c2.4-1.63 3.46-1.28 3.46-1.28.68 1.72.25 3-.12 3.32.81.88 1.29 1.99"
+    "1.29 3.36 0 4.77-2.9 5.83-5.67 6.15.37.32.7.94.7 1.9 0 1.37-.01 2.47-.01"
+    " 2.81 0 .29.2.63.75.53A11.02 11.02 0 0 0 23 12c0-6.07-4.93-11-11-11Z"
+)
 
 
 def monochrome_icon(name: str, color: str) -> QIcon:
     """Render a crisp, monochrome 24 px outline icon."""
+    if name == "github":
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
+            f'<path fill="{color}" d="{_GITHUB_MARK}"/></svg>'
+        )
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(48, 48)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        renderer.render(painter, QRectF(0, 0, 48, 48))
+        painter.end()
+        return QIcon(pixmap)
+
     body = _PATHS[name]
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
@@ -55,3 +81,8 @@ def monochrome_icon(name: str, color: str) -> QIcon:
     renderer.render(painter, QRectF(0, 0, 48, 48))
     painter.end()
     return QIcon(pixmap)
+
+
+def github_icon(color: str) -> QIcon:
+    """Render the filled GitHub mark in the requested theme colour."""
+    return monochrome_icon("github", color)

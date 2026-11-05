@@ -29,6 +29,22 @@ On Windows, with the Pixi environment installed, run:
 
 The script creates `dist/PointCloudEvaluation-v0.1.1.exe`. Pass a different semantic version to change the output name. PyInstaller is installed into the local Pixi environment if it is missing. Generated executables and build intermediates are local artifacts, not source files.
 
+For faster repeat launches, build a folder-based app with a splash screen:
+
+```powershell
+.\tools\build_windows_exe.ps1 -Version v0.1.1 -FastStart
+```
+
+This creates `dist/PointCloudEvaluation-v0.1.1/PointCloudEvaluation-v0.1.1.exe`. Keep the full folder together when moving or sharing the app. The normal one-file build remains available for single-file distribution.
+
+To distribute one EXE while avoiding a full extraction on every launch, use the cached launcher:
+
+```powershell
+.\tools\build_windows_exe.ps1 -Version v0.1.1 -CachedOneFile
+```
+
+The first launch caches the app under the user's `%LOCALAPPDATA%`; subsequent launches reuse it. This is the recommended mode for a single-file release.
+
 See the [Windows release process](windows-release.md) for building from a tag, validating the EXE, and preparing a release.
 
 ## Project layout
