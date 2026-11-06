@@ -1,10 +1,46 @@
 import sys
 import os
+import tempfile
+import traceback
 from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer, QRect, QSize
 from PyQt6.QtGui import QCursor, QGuiApplication, QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox, QProgressBar, QVBoxLayout, QWidget
 from src.ui.application_identity import application_icon, set_windows_app_id
+
+
+def _install_exception_handler(app):
+    log_directory = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "SPP2433" / "logs"
+    log_path = log_directory / "application-errors.log"
+
+    def handle_exception(exception_type, exception, traceback_object):
+        if issubclass(exception_type, KeyboardInterrupt):
+            sys.__excepthook__(exception_type, exception, traceback_object)
+            return
+
+        details = "".join(traceback.format_exception(exception_type, exception, traceback_object))
+        try:
+            log_directory.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(details + "\n")
+        except OSError:
+            pass
+
+        active_window = app.activeWindow()
+        if active_window is not None and hasattr(active_window, "set_loading_state"):
+            try:
+                active_window.set_loading_state(False, "Operation failed.")
+            except Exception:
+                pass
+
+        QMessageBox.critical(
+            app.activeWindow(),
+            "Unexpected application error",
+            f"The application encountered an unexpected error and could not finish the operation.\n\n"
+            f"Details were saved to:\n{log_path}",
+        )
+
+    sys.excepthook = handle_exception
 
 
 def _initial_window_geometry(app):
@@ -94,34 +130,54 @@ def main():
     app.setApplicationDisplayName("SPP 2433 - Point Cloud Evaluation")
     app.setWindowIcon(application_icon())
     app.setStyle("Fusion")
+    _install_exception_handler(app)
 
+    progress_file = os.environ.pop("SPP2433_STARTUP_PROGRESS_FILE", "")
     try:
         progress_base = max(0, min(60, int(os.environ.pop("SPP2433_STARTUP_PROGRESS", "0"))))
     except ValueError:
         progress_base = 0
     progress_span = 100 - progress_base
-    splash = StartupSplash(app)
-    splash.set_progress(progress_base, "Preparing application…")
-    splash.show()
+    splash = None if progress_file else StartupSplash(app)
+
+    def report_progress(value, message):
+        if splash is not None:
+            splash.set_progress(value, message)
+        if progress_file:
+            target = Path(progress_file)
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            try:
+                temporary.write_text(f"{value}\t{message}", encoding="utf-8")
+                os.replace(temporary, target)
+            except OSError:
+                pass
+
+    report_progress(progress_base, "Preparing application…")
+    if splash is not None:
+        splash.show()
     app.processEvents()
 
     def load_main_window():
         try:
-            splash.set_progress(progress_base + max(1, round(progress_span * 0.05)),
-                                "Loading application modules…")
+            report_progress(progress_base + max(1, round(progress_span * 0.05)),
+                            "Loading application modules…")
             from src.ui.main_window import MainWindow
 
-            splash.set_progress(progress_base + round(progress_span * 0.35),
-                                "Preparing the workspace…")
+            report_progress(progress_base + round(progress_span * 0.35),
+                            "Preparing the workspace…")
             window = MainWindow()
             app._main_window = window
-            splash.set_progress(progress_base + round(progress_span * 0.85),
-                                "Opening the workspace…")
+            report_progress(progress_base + round(progress_span * 0.85),
+                            "Opening the workspace…")
             window.show()
-            splash.set_progress(100, "Ready")
-            splash.close()
+            app.processEvents()
+            report_progress(100, "Ready")
+            if splash is not None:
+                splash.close()
         except Exception as error:
-            splash.close()
+            report_progress(-1, f"ERROR: {error}")
+            if splash is not None:
+                splash.close()
             QMessageBox.critical(
                 None,
                 "SPP 2433 - Point Cloud Evaluation",

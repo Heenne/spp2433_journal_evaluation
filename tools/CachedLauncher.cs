@@ -158,6 +158,7 @@ namespace SPP2433
 
         private async void OnShown(object sender, EventArgs eventArgs)
         {
+            string progressPath = null;
             try
             {
                 using (var mutex = new Mutex(false, "Local\\SPP2433PointCloudCache-" + BuildInfo.CacheKey))
@@ -190,9 +191,47 @@ namespace SPP2433
                 startInfo.WorkingDirectory = Path.GetDirectoryName(cachedExecutable);
                 startInfo.UseShellExecute = false;
                 startInfo.EnvironmentVariables["SPP2433_STARTUP_PROGRESS"] = "55";
+                progressPath = Path.Combine(
+                    Path.GetTempPath(), "spp2433-startup-" + Guid.NewGuid().ToString("N") + ".txt");
+                startInfo.EnvironmentVariables["SPP2433_STARTUP_PROGRESS_FILE"] = progressPath;
                 startInfo.Arguments = String.Join(" ", arguments.Select(QuoteArgument).ToArray());
-                Process.Start(startInfo);
-                Close();
+                using (Process application = Process.Start(startInfo))
+                {
+                    if (application == null)
+                        throw new InvalidOperationException("The application process could not be started.");
+
+                    while (!application.HasExited)
+                    {
+                        if (File.Exists(progressPath))
+                        {
+                            string[] update = ReadProgressFile(progressPath).Split(new[] { '\t' }, 2);
+                            int value;
+                            if (update.Length == 2 && Int32.TryParse(update[0], out value))
+                            {
+                                if (value < 0)
+                                {
+                                    Close();
+                                    return;
+                                }
+
+                                SetProgress(value, update[1]);
+                                if (value >= 100)
+                                {
+                                    await Task.Delay(200);
+                                    Close();
+                                    return;
+                                }
+                            }
+                        }
+
+                        await Task.Delay(100);
+                    }
+                }
+
+                statusLabel.Text = "Die App wurde vor dem Abschluss des Starts beendet.";
+                percentLabel.Text = "Fehler";
+                exitButton.Visible = true;
+                Activate();
             }
             catch (Exception exception)
             {
@@ -200,6 +239,14 @@ namespace SPP2433
                 percentLabel.Text = "Fehler";
                 exitButton.Visible = true;
                 Activate();
+            }
+            finally
+            {
+                if (!String.IsNullOrEmpty(progressPath) && File.Exists(progressPath))
+                {
+                    try { File.Delete(progressPath); }
+                    catch { }
+                }
             }
         }
 
@@ -290,6 +337,16 @@ namespace SPP2433
             percentLabel.Text = progressBar.Value + "%";
             statusLabel.Text = message;
             Application.DoEvents();
+        }
+
+        private static string ReadProgressFile(string path)
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new StreamReader(stream))
+            {
+                return reader.ReadToEnd();
+            }
         }
 
         private static string QuoteArgument(string argument)

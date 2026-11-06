@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from matplotlib import colormaps
 from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -9,9 +10,7 @@ from matplotlib.ticker import LinearLocator, MultipleLocator
 from src.utils.error_mapping import error_map_colours
 
 class PlotCanvas(FigureCanvas):
-    # Show the full filtered clouds by default. A preview budget can still be
-    # set explicitly, but must not silently reduce an unfiltered live view.
-    MAX_PREVIEW_POINTS = None
+    DEFAULT_PREVIEW_POINT_LIMIT = 50_000
 
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         self._rendering_suspended = False
@@ -31,6 +30,8 @@ class PlotCanvas(FigureCanvas):
             "show_legend": True, "legend_point_size": 16.0,
             "legend_placement": "inside", "legend_position": "upper right",
             "legend_title": "", "legend_labels": {}, "legend_label_lines": [],
+            "limit_preview_points": False,
+            "preview_point_limit": self.DEFAULT_PREVIEW_POINT_LIMIT,
         }
         self.fig = Figure(figsize=(width, height), dpi=dpi, constrained_layout=True)
         self.axes = self.fig.add_subplot(111, projection='3d')
@@ -191,9 +192,17 @@ class PlotCanvas(FigureCanvas):
         visible_datasets = [d for d in datasets if d.get("visible", False) and "df_filtered" in d and not d["df_filtered"].empty]
         self.preview_point_counts = []
         self._preview_notice.set_text("")
+        preview_point_limit = None
+        if self.preview_options.get("limit_preview_points", False):
+            try:
+                preview_point_limit = max(
+                    1, int(self.preview_options.get("preview_point_limit", self.DEFAULT_PREVIEW_POINT_LIMIT))
+                )
+            except (TypeError, ValueError):
+                preview_point_limit = self.DEFAULT_PREVIEW_POINT_LIMIT
         per_cloud_limit = (
-            max(1, self.MAX_PREVIEW_POINTS // max(1, len(visible_datasets)))
-            if self.MAX_PREVIEW_POINTS is not None else None
+            max(1, preview_point_limit // max(1, len(visible_datasets)))
+            if preview_point_limit is not None else None
         )
         
         if not visible_datasets:
@@ -224,7 +233,7 @@ class PlotCanvas(FigureCanvas):
                 ["#304D8B", "#5C80B7", "#93A8CC", "#CCB6C7", "#E9BAB1"], N=256,
             )
         else:
-            height_cmap = cm.get_cmap(height_cmap_name)
+            height_cmap = colormaps[height_cmap_name]
 
         colorbar_format = f"%.{int(options.get('colourbar_decimals', 2))}f"
 

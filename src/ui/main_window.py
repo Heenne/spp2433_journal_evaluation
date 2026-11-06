@@ -34,6 +34,7 @@ from src.ui.i18n import apply_language
 from src.ui.new_user_guide import NewUserGuideDialog
 from src.ui.theme import apply_theme
 from src.utils.app_settings import load_app_settings, save_app_settings
+from src.utils.update_check import fetch_newer_release, packaged_application_version
 from src.utils.export_layout import layout_export_z_axis
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.colors import LinearSegmentedColormap
@@ -53,6 +54,21 @@ class PointCloudNavigationToolbar(NavigationToolbar):
         customize_action = getattr(self, "_actions", {}).get("edit_parameters")
         if customize_action is not None:
             self.removeAction(customize_action)
+        self.setMovable(False)
+        self.setFloatable(False)
+        QTimer.singleShot(0, self._hide_extension_button)
+
+    def _hide_extension_button(self):
+        # QToolBar creates this narrow overflow button when its layout is
+        # constrained. The viewer has no overflow-only actions, so it only
+        # leaves an empty tab at the right edge of the plot toolbar.
+        extension_button = self.findChild(QToolButton, "qt_toolbar_ext_button")
+        if extension_button is not None:
+            extension_button.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._hide_extension_button)
 
     def set_icon_color(self, color: str):
         """Use the same monochrome outline set as the rest of the app."""
@@ -91,6 +107,9 @@ class MainWindow(QMainWindow):
         self.datasets = []
         self.project_filepath = None
         self.project_dirty = False
+        self._loading_cursor_active = False
+        self._update_check_started = False
+        self._update_check_worker = None
         
         self.init_ui()
         self._place_initial_window()
@@ -484,8 +503,63 @@ class MainWindow(QMainWindow):
             settings.get("startup_guide_version") == STARTUP_GUIDE_VERSION
             and settings.get("startup_guide_status") in {"completed", "skipped"}
         ):
+            QTimer.singleShot(500, self.check_for_updates)
             return
         self.start_new_user_guide()
+        QTimer.singleShot(500, self.check_for_updates)
+
+    def check_for_updates(self):
+        """Check once after startup without blocking the point-cloud workspace."""
+        if self._update_check_started:
+            return
+        self._update_check_started = True
+        current_version = packaged_application_version()
+        if current_version is None:
+            return
+
+        self._update_check_worker = WorkerThread(fetch_newer_release, current_version)
+        self._update_check_worker.finished.connect(self._on_update_check_finished)
+        self._update_check_worker.error.connect(lambda _message: None)
+        self._update_check_worker.start()
+
+    def _on_update_check_finished(self, release):
+        if not isinstance(release, dict):
+            return
+        release_version = release.get("version")
+        release_url = release.get("url")
+        if not isinstance(release_version, str) or not isinstance(release_url, str):
+            return
+
+        settings = load_app_settings()
+        if settings.get("ignored_update_version") == release_version:
+            return
+
+        if self.language == "de":
+            title = "Neue Version verfügbar"
+            message = (
+                f"Version {release_version} ist verfügbar.\n"
+                "Möchtest du die Release-Seite öffnen und die neue Version herunterladen?"
+            )
+            open_label, later_label = "Release-Seite öffnen", "Später"
+        else:
+            title = "New version available"
+            message = (
+                f"Version {release_version} is available.\n"
+                "Would you like to open the release page and download it?"
+            )
+            open_label, later_label = "Open release page", "Later"
+
+        dialog = QMessageBox(QMessageBox.Icon.Information, title, message, parent=self)
+        open_button = dialog.addButton(open_label, QMessageBox.ButtonRole.AcceptRole)
+        later_button = dialog.addButton(later_label, QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(later_button)
+        dialog.exec()
+
+        if dialog.clickedButton() is open_button:
+            QDesktopServices.openUrl(QUrl(release_url))
+        else:
+            settings["ignored_update_version"] = release_version
+            save_app_settings(settings)
 
     def guide_target(self, target_key: str):
         """Return the visible widget to spotlight for a guide step."""
@@ -540,14 +614,18 @@ class MainWindow(QMainWindow):
     def set_loading_state(self, is_loading: bool, message: str = ""):
         from PyQt6.QtCore import Qt
         if is_loading:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            if not self._loading_cursor_active:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                self._loading_cursor_active = True
             self.progress_bar.show()
             self.btn_cancel.show()
             self.statusBar().showMessage(message)
             self.control_panel.setEnabled(False)
             self.app_toolbar.setEnabled(False)
         else:
-            QApplication.restoreOverrideCursor()
+            if self._loading_cursor_active:
+                QApplication.restoreOverrideCursor()
+                self._loading_cursor_active = False
             self.progress_bar.hide()
             self.btn_cancel.hide()
             self.control_panel.setEnabled(True)
@@ -976,14 +1054,37 @@ class MainWindow(QMainWindow):
                     "scale": 1.0, "distance_unit": "mm",
                     "tx": 0.0, "ty": 0.0, "tz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0
                 }
-                if len(df) > 100000:
-                    config["voxel_enabled"] = True
-                    QMessageBox.information(
-                        self, 
-                        "Auto-Filter Activated", 
-                        f"Dataset {name} has {len(df):,} points which could cause lag.\n\n"
-                        f"A Voxel Downsample filter has been automatically enabled with a size of {auto_voxel_size:.3f} mm."
+
+            enabled_voxel_filter_automatically = False
+            if len(df) > 100_000 and not config.get("voxel_enabled", False):
+                if self.language == "de":
+                    prompt_title = "Große Punktwolke"
+                    prompt_text = (
+                        f"{name} enthält {len(df):,} Punkte. Diese Punktwolke kann die Live-Vorschau verlangsamen.\n\n"
+                        "Soll der Voxel-Filter für diese Punktwolke aktiviert werden?\n"
+                        "Die Quelldatei bleibt unverändert. Der Export mit voller Auflösung umgeht diese Voxel-Reduktion."
                     )
+                else:
+                    prompt_title = "Large point cloud"
+                    prompt_text = (
+                        f"{name} contains {len(df):,} points and may slow down the live preview.\n\n"
+                        "Enable the Voxel Grid filter for this point cloud?\n"
+                        "The source file stays unchanged. Full-resolution plot export bypasses this voxel reduction."
+                    )
+                answer = QMessageBox.question(
+                    self,
+                    prompt_title,
+                    prompt_text,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if answer == QMessageBox.StandardButton.Yes:
+                    config["voxel_enabled"] = True
+                    config.setdefault("voxel_size", 0.1)
+                    enabled_voxel_filter_automatically = True
+
+            if enabled_voxel_filter_automatically and not load_request["mark_project_dirty"]:
+                self.set_project_dirty(True)
                         
             dataset = {
                 "filepath": filepath,
@@ -1888,11 +1989,12 @@ class MainWindow(QMainWindow):
         self.icp_worker.start()
         
     def export_plot(self, filepath: str):
-        try:
-            self.plot_canvas.export_plot(filepath)
-            self.statusBar().showMessage(f"Plot exported to {filepath}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export plot: {str(e)}")
+        self.export_full_resolution_plot(
+            filepath,
+            export_options=self.control_panel.get_preview_plot_settings(),
+            use_display_points=False,
+            completion_title="Export Complete",
+        )
 
     @staticmethod
     def _export_view_state(canvas):
@@ -2272,8 +2374,10 @@ class MainWindow(QMainWindow):
         self.export_full_resolution_plot(
             filepath,
             export_options=self.control_panel.get_export_options(),
-            use_display_points=not full_resolution,
-            completion_title="Export Complete",
+            use_display_points=False,
+            completion_title=(
+                "Full-Resolution Export Complete" if full_resolution else "Export Complete"
+            ),
         )
 
     def request_plot_export(self, full_resolution: bool):

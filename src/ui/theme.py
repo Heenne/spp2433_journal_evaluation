@@ -116,8 +116,8 @@ QComboBox QAbstractItemView::item { min-height: 25px; padding: 5px 9px; border-r
 QComboBox QAbstractItemView::item:hover { background: #edf5fc; color: #103d6d; }
 QSpinBox, QDoubleSpinBox { padding: 2px 34px 2px 8px; }
 QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: top right; width: 28px; border: 0; border-left: 1px solid #bdc9d6; background: #e7edf4; }
-QSpinBox::up-button, QDoubleSpinBox::up-button { height: 50%; border-top-right-radius: 6px; border-bottom: 1px solid #cbd4de; }
-QSpinBox::down-button, QDoubleSpinBox::down-button { height: 50%; subcontrol-position: bottom right; border-bottom-right-radius: 6px; }
+QSpinBox::up-button, QDoubleSpinBox::up-button { height: 14px; border-top-right-radius: 6px; border-bottom: 1px solid #cbd4de; }
+QSpinBox::down-button, QDoubleSpinBox::down-button { height: 14px; subcontrol-position: bottom right; border-bottom-right-radius: 6px; }
 QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { background: #d7eafa; }
 QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed, QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed { background: #c4def3; }
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { subcontrol-origin: padding; subcontrol-position: center center; image: url("__SPIN_UP__"); width: 12px; height: 10px; border: 0; }
@@ -252,8 +252,8 @@ QComboBox QAbstractItemView::item { min-height: 25px; padding: 5px 9px; border-r
 QComboBox QAbstractItemView::item:hover { background: #2c4258; color: #ffffff; }
 QSpinBox, QDoubleSpinBox { padding: 2px 34px 2px 8px; }
 QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: top right; width: 28px; border: 0; border-left: 1px solid #4a5968; background: #323b47; }
-QSpinBox::up-button, QDoubleSpinBox::up-button { height: 50%; border-top-right-radius: 6px; border-bottom: 1px solid #414b57; }
-QSpinBox::down-button, QDoubleSpinBox::down-button { height: 50%; subcontrol-position: bottom right; border-bottom-right-radius: 6px; }
+QSpinBox::up-button, QDoubleSpinBox::up-button { height: 14px; border-top-right-radius: 6px; border-bottom: 1px solid #414b57; }
+QSpinBox::down-button, QDoubleSpinBox::down-button { height: 14px; subcontrol-position: bottom right; border-bottom-right-radius: 6px; }
 QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { background: #3e5e7b; }
 QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed, QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed { background: #294f70; }
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { subcontrol-origin: padding; subcontrol-position: center center; image: url("__SPIN_UP__"); width: 12px; height: 10px; border: 0; }

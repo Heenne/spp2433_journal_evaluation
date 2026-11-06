@@ -331,12 +331,39 @@ class ControlPanel(QWidget):
         preview_legend_form.addRow("Legend labels:", self.preview_legend_labels)
         preview_legend_group.setLayout(preview_legend_form)
 
+        preview_performance_group = QGroupBox("Performance")
+        preview_performance_layout = QVBoxLayout()
+        self.preview_limit_points_check = QCheckBox("Limit points in interactive preview")
+        self.preview_limit_points_check.setToolTip(
+            "Limits point density in the live plot only. Plot exports always use full resolution."
+        )
+        self.preview_point_limit_spin = QSpinBox()
+        self.preview_point_limit_spin.setRange(1_000, 10_000_000)
+        self.preview_point_limit_spin.setSingleStep(10_000)
+        self.preview_point_limit_spin.setValue(50_000)
+        self.preview_point_limit_spin.setEnabled(False)
+        self.preview_limit_points_check.toggled.connect(self.preview_point_limit_spin.setEnabled)
+        preview_performance_form = QFormLayout()
+        preview_performance_form.addRow("Maximum preview points:", self.preview_point_limit_spin)
+        preview_performance_layout.addWidget(self.preview_limit_points_check)
+        preview_performance_layout.addLayout(preview_performance_form)
+        preview_performance_hint = QLabel(
+            "This limit only affects the interactive preview. Plot exports always use all points."
+        )
+        preview_performance_hint.setWordWrap(True)
+        preview_performance_hint.setObjectName("sectionHint")
+        preview_performance_layout.addWidget(preview_performance_hint)
+        preview_performance_group.setLayout(preview_performance_layout)
+
         preview_plot_layout.addWidget(preview_colour_group)
         preview_plot_layout.addWidget(preview_axes_group)
         preview_plot_layout.addWidget(preview_legend_group)
+        preview_plot_layout.addWidget(preview_performance_group)
         preview_plot_layout.addStretch()
         tab_preview_plot.setLayout(preview_plot_layout)
-        self.preview_plot_groups = (preview_colour_group, preview_axes_group, preview_legend_group)
+        self.preview_plot_groups = (
+            preview_colour_group, preview_axes_group, preview_legend_group, preview_performance_group,
+        )
         self.preview_plot_fields = {
             "use_heatmap": self.preview_use_heatmap_check,
             "use_heightmap": self.preview_use_heightmap_check,
@@ -363,6 +390,8 @@ class ControlPanel(QWidget):
             "legend_position": self.preview_legend_position_combo,
             "legend_title": self.preview_legend_title,
             "legend_labels": self.preview_legend_labels,
+            "limit_preview_points": self.preview_limit_points_check,
+            "preview_point_limit": self.preview_point_limit_spin,
         }
         self._loading_preview_plot_settings = False
         for field in self.preview_plot_fields.values():
@@ -1654,6 +1683,8 @@ class ControlPanel(QWidget):
             "legend_labels": labels,
             "legend_labels_text": self.preview_legend_labels.toPlainText(),
             "legend_label_lines": sequential_labels,
+            "limit_preview_points": self.preview_limit_points_check.isChecked(),
+            "preview_point_limit": self.preview_point_limit_spin.value(),
         }
 
     def load_preview_plot_settings(self, options):
@@ -1686,6 +1717,11 @@ class ControlPanel(QWidget):
             self.preview_z_ticks_spin.setEnabled(self.preview_z_tick_interval_spin.value() == 0)
             self.preview_show_legend_check.setChecked(bool(options.get("show_legend", True)))
             self.preview_legend_point_size_spin.setValue(float(options.get("legend_point_size", 16.0)))
+            self.preview_limit_points_check.setChecked(bool(options.get("limit_preview_points", False)))
+            self.preview_point_limit_spin.setValue(
+                int(options.get("preview_point_limit", 50_000))
+            )
+            self.preview_point_limit_spin.setEnabled(self.preview_limit_points_check.isChecked())
             for key, combo in (("legend_placement", self.preview_legend_placement_combo),
                                ("legend_position", self.preview_legend_position_combo)):
                 index = combo.findData(options.get(key))

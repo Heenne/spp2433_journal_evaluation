@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pandas as pd
@@ -47,7 +47,7 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
                  "settings": {"color_col": "intensity"}}
         canvas = PlotCanvas()
         try:
-            canvas.MAX_PREVIEW_POINTS = 10_000
+            canvas.set_preview_options({"limit_preview_points": True, "preview_point_limit": 10_000})
             canvas.plot_datasets([cloud])
             scatter = canvas.axes.collections[0]
             px, py, pz = (np.asarray(axis).copy() for axis in scatter._offsets3d)
@@ -82,7 +82,7 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
         reference = {"name": "reference", "visible": True, "df_filtered": source["df_filtered"], "settings": {}}
         canvas = PlotCanvas()
         try:
-            canvas.MAX_PREVIEW_POINTS = 20
+            canvas.set_preview_options({"limit_preview_points": True, "preview_point_limit": 20})
             canvas.plot_datasets([source, reference])
             self.assertLessEqual(sum(len(collection._offsets3d[0]) for collection in canvas.axes.collections), 20)
             self.assertEqual(canvas.preview_point_counts, [(1000, 10), (1000, 10)])
@@ -228,7 +228,7 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
             "settings": {"base_color": "C0", "voxel_enabled": True, "voxel_size": 10.0},
         }
         canvas = PlotCanvas()
-        canvas.MAX_PREVIEW_POINTS = 1
+        canvas.set_preview_options({"limit_preview_points": True, "preview_point_limit": 1})
         canvas.plot_datasets([{**dataset, "df_filtered": dataset["df"]}])
         self.assertEqual(canvas.preview_point_counts, [(2, 1)])
         window = MainWindow.__new__(MainWindow)
@@ -249,6 +249,38 @@ class PointwiseErrorMapPlotTests(unittest.TestCase):
             self.assertGreater(os.path.getsize(output), 0)
             self.assertEqual(exported_point_counts, [2])
         canvas.deleteLater()
+
+    def test_toolbar_plot_export_uses_full_resolution_not_the_live_preview_sample(self):
+        window = MainWindow.__new__(MainWindow)
+        preview_options = {"limit_preview_points": True, "preview_point_limit": 1_000}
+        window.control_panel = Mock()
+        window.control_panel.get_preview_plot_settings.return_value = preview_options
+        window.export_full_resolution_plot = Mock()
+
+        window.export_plot("cloud.png")
+
+        window.export_full_resolution_plot.assert_called_once_with(
+            "cloud.png",
+            export_options=preview_options,
+            use_display_points=False,
+            completion_title="Export Complete",
+        )
+
+    def test_configured_plot_exports_use_full_resolution_even_for_display_action(self):
+        window = MainWindow.__new__(MainWindow)
+        export_options = {"point_size": 3.0}
+        window.control_panel = Mock()
+        window.control_panel.get_export_options.return_value = export_options
+        window.export_full_resolution_plot = Mock()
+
+        window.export_configured_plot("cloud.png", full_resolution=False)
+
+        window.export_full_resolution_plot.assert_called_once_with(
+            "cloud.png",
+            export_options=export_options,
+            use_display_points=False,
+            completion_title="Export Complete",
+        )
 
     def test_full_resolution_export_recalculates_an_active_error_colour_map(self):
         reference = {
