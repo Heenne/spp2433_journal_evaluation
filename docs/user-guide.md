@@ -20,7 +20,7 @@ The reference stays fixed during alignment. The selected measurement is moved in
 
 The app reads comma-separated `.csv` files and binary `.ply` point clouds. Both need three numeric coordinates named `X`, `Y`, and `Z` (the names are case-insensitive). CSV files need a header row. Extra columns are retained and can be used for colour mapping. Make sure the coordinates are finite and understand each file's units before alignment.
 
-The project file keeps settings and refers to source files by path. It does not copy the point data into the project. Keep the source files in place, or reopen the project on a computer where those paths resolve.
+The project file keeps settings and refers to source files by path. It does not copy the point data into the project. A regular **Save** or **Save project as** keeps the source file paths used on this computer. Use **Pack & Go** to create a portable ZIP for sharing with project partners.
 
 ## 2. Create a project and add clouds
 
@@ -28,7 +28,7 @@ The project file keeps settings and refers to source files by path. It does not 
 2. Add the reference cloud and the measurement cloud(s) to the same project. The reference is simply the cloud you choose as the fixed comparison target; it does not need a special file type.
 3. Select a cloud in the left **Point Clouds** list to edit its settings. Use its checkbox to show or hide it in the plot. The checkbox does not remove it from the project.
 4. The list order controls drawing order: clouds nearer the top are drawn on top of clouds below. Use the up/down controls to change only the display order; this does not move the clouds or alter the analysis.
-5. Use **Save as** to create a project JSON. Later, use **Save** to update it. Save after alignment and again after calculating results.
+5. Use **Save project as** to create a project JSON. Later, use **Save** to update it. Save after alignment and again after calculating results.
 
 If the same raw file is loaded twice, both entries refer to that file but have separate project settings. For large files, a prompt may offer an existing cached/filtered CSV; choose it only if that saved data is the version you intend to analyse.
 
@@ -79,10 +79,11 @@ Save the project after calculation to retain the numeric report. The display col
 ## 7. Save point clouds and figures
 
 - Use **Export Point Cloud** in the top toolbar for **Export filtered** or **Export centered**. A selected cloud can also be right-clicked in the list for these actions.
+- Use **Pack & Go** in the top toolbar to create a ZIP containing every loaded cloud and its project settings. You can rename each copied file in the dialog; the original files stay untouched. The project inside the ZIP uses relative paths. Send the complete ZIP to your project partners; they should extract it and open the included `Projekt.json`.
 - **Export filtered** writes a new CSV with the selected cloud's current transforms and enabled filters. The original file stays unchanged.
 - **Export centered** creates a separate copy translated to its centroid; it does not alter the source cloud in the project.
 - Open **Export** to configure plot appearance, profiles, preview settings, and plot export. Use the preview to check labels, axes, legend, and colour scale before saving a figure.
-- Project export profiles and preview-plot settings are stored in the project. Use the profile import button to copy a profile from another project or import an older standalone export-settings JSON.
+- Project export profiles and preview-plot settings are stored in the project. Create a named export profile for each cloud or plot style, then select it before exporting. Profiles are project-wide, not automatically tied to a particular cloud. Use the profile import button to copy a profile from another project or import an older standalone export-settings JSON.
 
 ## Troubleshooting
 

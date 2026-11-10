@@ -56,8 +56,8 @@ def is_newer_version(candidate: str, current: str) -> bool:
     return candidate_suffix.lower() > current_suffix.lower()
 
 
-def fetch_newer_release(current_version: str) -> dict | None:
-    """Return the latest release details when it is newer; fail silently offline."""
+def fetch_newer_release(current_version: str) -> dict:
+    """Return update status and newer release details; fail silently offline."""
     request = Request(
         LATEST_RELEASE_API,
         headers={
@@ -69,15 +69,16 @@ def fetch_newer_release(current_version: str) -> dict | None:
         with urlopen(request, timeout=4) as response:
             release = json.loads(response.read(1_000_000).decode("utf-8"))
     except (OSError, URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return {"checked": False, "latest_version": None, "release": None}
 
     tag = release.get("tag_name") if isinstance(release, dict) else None
-    if not isinstance(tag, str) or not is_newer_version(tag, current_version):
-        return None
+    if not isinstance(tag, str):
+        return {"checked": False, "latest_version": None, "release": None}
 
     release_url = release.get("html_url")
     if not isinstance(release_url, str) or not release_url.startswith(
         f"https://github.com/{REPOSITORY}/releases/"
     ):
         release_url = LATEST_RELEASE_PAGE
-    return {"version": tag, "url": release_url}
+    newer_release = {"version": tag, "url": release_url} if is_newer_version(tag, current_version) else None
+    return {"checked": True, "latest_version": tag, "release": newer_release}

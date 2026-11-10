@@ -4,7 +4,7 @@ The plot stays visible in the centre while the selected cloud list remains on th
 
 | Where | What is there |
 | --- | --- |
-| Top toolbar | Open project and recent projects, add point cloud, save/save as, point-cloud export, TXT-to-CSV conversion, theme, and language. |
+| Top toolbar | Open project and recent projects, add point cloud, save, **Save project as**, **Pack & Go** project sharing, point-cloud export, TXT-to-CSV conversion, theme, and language. |
 | Left **Point Clouds** list | Select the cloud whose settings to edit, toggle plot visibility, and change draw order. Right-click a cloud to export filtered data or create a centred copy. |
 | **Data** | Cloud colour, additional-column colour mapping, error-map display, and camera orientation. |
 | **Preview Plot** | Live plot appearance settings that are saved with the project. |

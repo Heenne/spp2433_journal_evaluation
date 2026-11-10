@@ -32,10 +32,33 @@ def parse_point_cloud_ply(filepath: str) -> Tuple[Optional[pd.DataFrame], List[s
     """Loads a PLY file and normalizes the X, Y, Z columns."""
     try:
         with open(filepath, 'rb') as f:
+            first_line = f.readline()
+            if not first_line:
+                return None, [], "The PLY file is empty."
+
+            # Older filtered exports could contain CSV text while keeping the
+            # source .ply extension. Accept those files by their actual header.
+            first_line_text = first_line.decode('utf-8-sig', errors='replace').strip()
+            csv_columns = [
+                column.strip().strip('\"').lower()
+                for column in first_line_text.split(',')
+            ]
+            if {'x', 'y', 'z'}.issubset(csv_columns):
+                return parse_point_cloud_csv(filepath)
+            if first_line_text.lower() != 'ply':
+                return None, [], (
+                    "This file is not a valid PLY file. Its content may be CSV; "
+                    "if so, rename it with a .csv extension and try again."
+                )
+
+            f.seek(0)
             header = []
             vertex_count = 0
             while True:
-                line = f.readline().decode('utf-8').strip()
+                raw_line = f.readline()
+                if not raw_line:
+                    return None, [], "Invalid PLY file: header is missing 'end_header'."
+                line = raw_line.decode('utf-8').strip()
                 header.append(line)
                 if line.startswith('element vertex'):
                     vertex_count = int(line.split()[-1])

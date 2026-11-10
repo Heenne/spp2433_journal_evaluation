@@ -9,9 +9,10 @@ QToolBar#projectToolbar { background: #ffffff; border: 0; border-bottom: 1px sol
 QToolBar#projectToolbar::separator { width: 1px; background: #e7ebf0; margin: 6px 7px; }
 QToolBar#projectToolbar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 6px 9px; font-weight: 600; }
 QToolBar#projectToolbar QToolButton:hover, QToolBar#projectToolbar QToolButton:checked { background: #f4f6f9; }
-QToolBar#projectToolbar QToolButton#themeChoice, QToolBar#projectToolbar QToolButton#helpChoice, QToolBar#projectToolbar QToolButton#githubChoice { padding: 5px; }
+QToolBar#projectToolbar QToolButton#themeChoice, QToolBar#projectToolbar QToolButton#helpChoice { padding: 5px; }
 QToolBar#projectToolbar QToolButton#themeChoice:checked { background: #eef1f5; border-color: #d8dee7; }
-QToolBar#projectToolbar QToolButton#recentProjectsButton, QToolBar#projectToolbar QToolButton#exportMenuButton { min-width: 42px; padding: 4px; }
+QToolBar#projectToolbar QToolButton#recentProjectsButton, QToolBar#projectToolbar QToolButton#exportMenuButton { min-width: 28px; padding: 4px; }
+QToolBar#projectToolbar QToolButton#openProjectButton, QToolBar#projectToolbar QToolButton#toolbarExportButton { padding-right: 4px; }
 QToolBar#projectToolbar QToolButton#recentProjectsButton::menu-indicator, QToolBar#projectToolbar QToolButton#exportMenuButton::menu-indicator { image: none; width: 0; }
 QToolBar#projectToolbar QToolButton#languageChoice { min-width: 38px; padding: 5px; font-weight: 700; }
 QWidget#projectSidebar { background: #ffffff; border-right: 1px solid #e7ebf0; }
@@ -24,6 +25,10 @@ QLabel#sidebarSubtitle { color: #64748b; font-size: 9pt; }
 QLabel#guideStepLabel { color: #0c65ae; font-size: 9pt; font-weight: 700; }
 QLabel#guideHeading { color: #17243a; font-size: 18pt; font-weight: 700; }
 QLabel#guideBody { color: #334155; font-size: 11pt; }
+QLabel#comparisonStatus { border-radius: 8px; border: 1px solid; padding: 5px 9px; font-weight: 600; }
+QLabel#comparisonStatus[state="ready"] { color: #17643a; background: #e6f5ea; border-color: #a9d8b6; }
+QLabel#comparisonStatus[state="warning"] { color: #875400; background: #fff4d7; border-color: #e7c979; }
+QLabel#comparisonStatus[state="empty"] { color: #9f1d20; background: #fde8e7; border-color: #f0aaa7; }
 QProgressBar#guideProgress { background: #e7edf3; border: 0; border-radius: 3px; }
 QProgressBar#guideProgress::chunk { background: #0c65ae; border-radius: 3px; }
 QToolBar#viewerToolbar { background: transparent; border: 0; spacing: 2px; padding: 0; }
@@ -124,6 +129,7 @@ QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { subcontrol-origin: padding; subco
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { subcontrol-origin: padding; subcontrol-position: center center; image: url("__SPIN_DOWN__"); width: 12px; height: 10px; border: 0; }
 QMenu { background: #ffffff; color: #202938; border: 1px solid #d4dce5; border-radius: 8px; padding: 5px; }
 QMenu::item { min-height: 24px; padding: 6px 24px 6px 10px; border-radius: 5px; }
+QMenu#helpMenu { padding-left: 12px; }
 QMenu::item:selected { background: #e3effa; color: #103d6d; }
 QMenu::item:disabled { color: #98a3af; }
 QMenu::separator { height: 1px; background: #e1e7ee; margin: 4px 7px; }
@@ -146,9 +152,10 @@ QToolBar#projectToolbar { background: #17191d; border: 0; border-bottom: 1px sol
 QToolBar#projectToolbar::separator { width: 1px; background: #30343a; margin: 6px 7px; }
 QToolBar#projectToolbar QToolButton { background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 6px 9px; font-weight: 600; }
 QToolBar#projectToolbar QToolButton:hover, QToolBar#projectToolbar QToolButton:checked { background: #24272c; }
-QToolBar#projectToolbar QToolButton#themeChoice, QToolBar#projectToolbar QToolButton#helpChoice, QToolBar#projectToolbar QToolButton#githubChoice { padding: 5px; }
+QToolBar#projectToolbar QToolButton#themeChoice, QToolBar#projectToolbar QToolButton#helpChoice { padding: 5px; }
 QToolBar#projectToolbar QToolButton#themeChoice:checked { background: #292d33; border-color: #3b4048; }
-QToolBar#projectToolbar QToolButton#recentProjectsButton, QToolBar#projectToolbar QToolButton#exportMenuButton { min-width: 42px; padding: 4px; }
+QToolBar#projectToolbar QToolButton#recentProjectsButton, QToolBar#projectToolbar QToolButton#exportMenuButton { min-width: 28px; padding: 4px; }
+QToolBar#projectToolbar QToolButton#openProjectButton, QToolBar#projectToolbar QToolButton#toolbarExportButton { padding-right: 4px; }
 QToolBar#projectToolbar QToolButton#recentProjectsButton::menu-indicator, QToolBar#projectToolbar QToolButton#exportMenuButton::menu-indicator { image: none; width: 0; }
 QToolBar#projectToolbar QToolButton#languageChoice { min-width: 38px; padding: 5px; font-weight: 700; }
 QWidget#projectSidebar { background: #17191d; border-right: 1px solid #30343a; }
@@ -160,6 +167,10 @@ QLabel#sectionHint, QLabel#sidebarHint, QLabel#sidebarSubtitle { color: #a3a8b0;
 QLabel#guideStepLabel { color: #7db9e9; font-size: 9pt; font-weight: 700; }
 QLabel#guideHeading { color: #f0f1f2; font-size: 18pt; font-weight: 700; }
 QLabel#guideBody { color: #d0d6dd; font-size: 11pt; }
+QLabel#comparisonStatus { border-radius: 8px; border: 1px solid; padding: 5px 9px; font-weight: 600; }
+QLabel#comparisonStatus[state="ready"] { color: #a8e0b9; background: #1c382a; border-color: #356b49; }
+QLabel#comparisonStatus[state="warning"] { color: #f3cf82; background: #42351d; border-color: #77602b; }
+QLabel#comparisonStatus[state="empty"] { color: #ffaaa5; background: #482526; border-color: #874245; }
 QProgressBar#guideProgress { background: #343b44; border: 0; border-radius: 3px; }
 QProgressBar#guideProgress::chunk { background: #5ba2dc; border-radius: 3px; }
 QToolBar#viewerToolbar { background: transparent; border: 0; spacing: 2px; padding: 0; }
@@ -260,6 +271,7 @@ QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { subcontrol-origin: padding; subco
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { subcontrol-origin: padding; subcontrol-position: center center; image: url("__SPIN_DOWN__"); width: 12px; height: 10px; border: 0; }
 QMenu { background: #20252d; color: #e6e8eb; border: 1px solid #46515e; border-radius: 8px; padding: 5px; }
 QMenu::item { min-height: 24px; padding: 6px 24px 6px 10px; border-radius: 5px; }
+QMenu#helpMenu { padding-left: 12px; }
 QMenu::item:selected { background: #294f70; color: #ffffff; }
 QMenu::item:disabled { color: #788391; }
 QMenu::separator { height: 1px; background: #3b4652; margin: 4px 7px; }

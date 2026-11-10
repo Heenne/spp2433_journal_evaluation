@@ -1,4 +1,7 @@
 import os
+import re
+import tempfile
+import zipfile
 from copy import deepcopy
 import pandas as pd
 import numpy as np
@@ -6,9 +9,9 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog, 
     QMessageBox, QMenu, QApplication, QProgressBar, QPushButton, QSplitter,
     QToolBar, QToolButton, QDialog, QLabel, QDialogButtonBox,
-    QFormLayout, QDoubleSpinBox, QCheckBox, QSizePolicy
+    QFormLayout, QDoubleSpinBox, QCheckBox, QSizePolicy, QLineEdit
 )
-from PyQt6.QtCore import Qt, QSize, QRect, QPoint, QTimer, QUrl
+from PyQt6.QtCore import QEvent, QObject, Qt, QSize, QRect, QPoint, QTimer, QUrl
 from PyQt6.QtGui import QAction, QPixmap, QCursor, QGuiApplication, QDesktopServices
 from src.ui.plot_canvas import PlotCanvas
 from src.ui.control_panel import ControlPanel
@@ -41,6 +44,28 @@ from matplotlib.colors import LinearSegmentedColormap
 
 
 STARTUP_GUIDE_VERSION = 2
+
+
+class TaskbarAttentionFilter(QObject):
+    """Flash the app's taskbar button when a modal dialog appears in background."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Show and isinstance(watched, QDialog) and watched.isModal():
+            app = QApplication.instance()
+            owner = watched.parentWidget()
+            while owner is not None and owner is not self.window:
+                owner = owner.parentWidget()
+            if (
+                owner is self.window
+                and app is not None
+                and app.applicationState() != Qt.ApplicationState.ApplicationActive
+            ):
+                QApplication.alert(self.window, 0)
+        return False
 
 
 class PointCloudNavigationToolbar(NavigationToolbar):
@@ -110,8 +135,17 @@ class MainWindow(QMainWindow):
         self._loading_cursor_active = False
         self._update_check_started = False
         self._update_check_worker = None
+        self._update_check_complete = False
+        self._update_check_succeeded = False
+        self._latest_release_version = None
+        self._latest_release = None
+        self._about_dialog = None
+        self._about_update_status_label = None
+        self._about_release_button = None
         
         self.init_ui()
+        self._taskbar_attention_filter = TaskbarAttentionFilter(self)
+        QApplication.instance().installEventFilter(self._taskbar_attention_filter)
         self._place_initial_window()
         QTimer.singleShot(250, self._show_new_user_guide_on_first_run)
 
@@ -179,7 +213,7 @@ class MainWindow(QMainWindow):
         self.recent_projects_button.setObjectName("recentProjectsButton")
         self.recent_projects_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
         self.recent_projects_button.setIconSize(self.open_project_button.iconSize())
-        self.recent_projects_button.setFixedSize(42, 38)
+        self.recent_projects_button.setFixedSize(28, 38)
         self.recent_projects_button.setToolTip("Recent projects")
         self.recent_projects_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.recent_projects_button.setMenu(self.recent_projects_menu)
@@ -189,6 +223,8 @@ class MainWindow(QMainWindow):
         project_split_layout.setContentsMargins(0, 0, 0, 0)
         project_split_layout.setSpacing(0)
         self.open_project_button.setFixedHeight(38)
+        self.open_project_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.project_split_control.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         project_split_layout.addWidget(self.open_project_button)
         project_split_layout.addWidget(self.recent_projects_button)
         self.app_toolbar.addWidget(self.project_split_control)
@@ -205,9 +241,14 @@ class MainWindow(QMainWindow):
             "Ctrl+S",
         )
         self.save_as_project_action = toolbar_action(
-            monochrome_icon("save_as", self._icon_color), "Save as",
+            monochrome_icon("save_as", self._icon_color), "Save project as",
             self.save_project_as_dialog, "Ctrl+Shift+S",
         )
+        self.pack_project_action = toolbar_action(
+            monochrome_icon("package", self._icon_color), "Pack && Go",
+            self.pack_project_for_sharing, add=True,
+        )
+        self.pack_project_action.setToolTip("Create a portable ZIP with the project and its point clouds.")
         self.export_menu = QMenu(self)
         self.export_filtered_action = QAction("Export filtered", self)
         self.export_filtered_action.triggered.connect(self.save_filtered_dataset)
@@ -225,7 +266,7 @@ class MainWindow(QMainWindow):
         self.export_menu_button.setObjectName("exportMenuButton")
         self.export_menu_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
         self.export_menu_button.setIconSize(self.open_project_button.iconSize())
-        self.export_menu_button.setFixedSize(42, 38)
+        self.export_menu_button.setFixedSize(28, 38)
         self.export_menu_button.setToolTip("Export options")
         self.export_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.export_menu_button.setMenu(self.export_menu)
@@ -235,6 +276,8 @@ class MainWindow(QMainWindow):
         export_split_layout.setContentsMargins(0, 0, 0, 0)
         export_split_layout.setSpacing(0)
         self.export_button.setFixedHeight(38)
+        self.export_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.export_split_control.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         export_split_layout.addWidget(self.export_button)
         export_split_layout.addWidget(self.export_menu_button)
         self.app_toolbar.addWidget(self.export_split_control)
@@ -295,30 +338,36 @@ class MainWindow(QMainWindow):
             monochrome_icon("help", self._icon_color), "New user guide",
             self.start_new_user_guide, add=False,
         )
+        self.github_repository_action = toolbar_action(
+            github_icon(self._icon_color), "GitHub repository",
+            lambda: QDesktopServices.openUrl(QUrl(
+                "https://github.com/Heenne/spp2433_journal_evaluation"
+            )),
+            add=False,
+        )
+        self.about_action = toolbar_action(
+            monochrome_icon("info", self._icon_color), "About",
+            self.show_about_dialog, add=False,
+        )
         choices_layout.addSpacing(5)
         guide_button = QToolButton(choices)
         guide_button.setObjectName("helpChoice")
-        guide_button.setDefaultAction(self.documentation_action)
+        guide_button.setIcon(monochrome_icon("help", self._icon_color))
         guide_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         guide_button.setIconSize(self.open_project_button.iconSize())
         guide_button.setFixedSize(38, 38)
-        guide_button.setMenu(QMenu(guide_button))
-        guide_button.menu().addAction(self.new_user_guide_action)
-        guide_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        guide_button.setToolTip("Documentation; open the menu for the new user guide")
+        guide_button.setAccessibleName("Help and information")
+        self.help_menu = QMenu(guide_button)
+        self.help_menu.setObjectName("helpMenu")
+        self.help_menu.addAction(self.documentation_action)
+        self.help_menu.addAction(self.new_user_guide_action)
+        self.help_menu.addAction(self.github_repository_action)
+        self.help_menu.addSeparator()
+        self.help_menu.addAction(self.about_action)
+        guide_button.setMenu(self.help_menu)
+        guide_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        guide_button.setToolTip("Help and information")
         choices_layout.addWidget(guide_button)
-        self.github_button = QToolButton(choices)
-        self.github_button.setObjectName("githubChoice")
-        self.github_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.github_button.setIcon(github_icon(self._icon_color))
-        self.github_button.setIconSize(self.open_project_button.iconSize())
-        self.github_button.setFixedSize(38, 38)
-        self.github_button.setAccessibleName("GitHub repository")
-        self.github_button.setToolTip("Open the project on GitHub")
-        self.github_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(
-            "https://github.com/Heenne/spp2433_journal_evaluation"
-        )))
-        choices_layout.addWidget(self.github_button)
         self.app_toolbar.addWidget(choices)
         
         # Central Widget
@@ -445,6 +494,7 @@ class MainWindow(QMainWindow):
             self.open_data_action.setIcon(monochrome_icon("cloud", self._icon_color))
             self.save_project_action.setIcon(monochrome_icon("save", self._icon_color))
             self.save_as_project_action.setIcon(monochrome_icon("save_as", self._icon_color))
+            self.pack_project_action.setIcon(monochrome_icon("package", self._icon_color))
             self.recent_projects_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
             self.light_theme_action.setIcon(monochrome_icon("sun", self._icon_color))
             self.dark_theme_action.setIcon(monochrome_icon("moon", self._icon_color))
@@ -453,7 +503,8 @@ class MainWindow(QMainWindow):
             self.export_menu_button.setIcon(monochrome_icon("chevron_down", self._icon_color))
             self.documentation_action.setIcon(monochrome_icon("help", self._icon_color))
             self.new_user_guide_action.setIcon(monochrome_icon("help", self._icon_color))
-            self.github_button.setIcon(github_icon(self._icon_color))
+            self.github_repository_action.setIcon(github_icon(self._icon_color))
+            self.about_action.setIcon(monochrome_icon("info", self._icon_color))
             for action, icon_name in (
                 (self.export_filtered_action, "cloud"),
                 (self.export_centered_action, "cloud"),
@@ -508,30 +559,53 @@ class MainWindow(QMainWindow):
         self.start_new_user_guide()
         QTimer.singleShot(500, self.check_for_updates)
 
-    def check_for_updates(self):
-        """Check once after startup without blocking the point-cloud workspace."""
-        if self._update_check_started:
+    def check_for_updates(self, force: bool = False):
+        """Check releases in the background without blocking the workspace."""
+        if self._update_check_started and not force:
+            return
+        if self._update_check_worker is not None and self._update_check_worker.isRunning():
             return
         self._update_check_started = True
+        self._update_check_complete = False
+        self._update_check_succeeded = False
+        self._refresh_about_update_status()
         current_version = packaged_application_version()
         if current_version is None:
+            self._update_check_complete = True
+            self._refresh_about_update_status()
             return
 
         self._update_check_worker = WorkerThread(fetch_newer_release, current_version)
         self._update_check_worker.finished.connect(self._on_update_check_finished)
-        self._update_check_worker.error.connect(lambda _message: None)
+        self._update_check_worker.error.connect(self._on_update_check_error)
         self._update_check_worker.start()
 
+    def _on_update_check_error(self, _message):
+        self._update_check_complete = True
+        self._update_check_succeeded = False
+        self._latest_release = None
+        self._refresh_about_update_status()
+
     def _on_update_check_finished(self, release):
-        if not isinstance(release, dict):
+        self._update_check_complete = True
+        self._update_check_succeeded = bool(isinstance(release, dict) and release.get("checked"))
+        self._latest_release_version = (
+            release.get("latest_version") if self._update_check_succeeded else None
+        )
+        self._latest_release = release.get("release") if self._update_check_succeeded else None
+        self._refresh_about_update_status()
+
+        if not isinstance(self._latest_release, dict):
             return
-        release_version = release.get("version")
-        release_url = release.get("url")
+        release_version = self._latest_release.get("version")
+        release_url = self._latest_release.get("url")
         if not isinstance(release_version, str) or not isinstance(release_url, str):
             return
 
         settings = load_app_settings()
         if settings.get("ignored_update_version") == release_version:
+            return
+        if self._about_dialog is not None and self._about_dialog.isVisible():
             return
 
         if self.language == "de":
@@ -560,6 +634,106 @@ class MainWindow(QMainWindow):
         else:
             settings["ignored_update_version"] = release_version
             save_app_settings(settings)
+
+    def _refresh_about_update_status(self):
+        if self._about_update_status_label is None:
+            return
+        current_version = packaged_application_version()
+        if self._latest_release is not None:
+            version = self._latest_release.get("version", "")
+            message = f"Neue Version verfügbar: {version}" if self.language == "de" else (
+                f"New version available: {version}"
+            )
+        elif not self._update_check_started:
+            message = "Update-Status wird beim Start geprüft." if self.language == "de" else (
+                "Update status is checked at startup."
+            )
+        elif not self._update_check_complete:
+            message = "Suche nach Updates läuft …" if self.language == "de" else "Checking for updates …"
+        elif not current_version:
+            message = "Update-Prüfung nur in der installierten Version verfügbar." if self.language == "de" else (
+                "Update checks are available in the packaged app."
+            )
+        elif not self._update_check_succeeded:
+            message = "Update-Prüfung derzeit nicht erreichbar." if self.language == "de" else (
+                "Update check is currently unavailable."
+            )
+        else:
+            latest = self._latest_release_version or current_version
+            message = f"Aktuell: {current_version} · Neueste Release: {latest}" if self.language == "de" else (
+                f"Installed: {current_version} · Latest release: {latest}"
+            )
+        self._about_update_status_label.setText(message)
+        if self._about_release_button is not None:
+            self._about_release_button.setVisible(self._latest_release is not None)
+
+    def show_about_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Über SPP 2433" if self.language == "de" else "About SPP 2433")
+        dialog.setMinimumWidth(430)
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel("SPP 2433")
+        title.setObjectName("guideHeading")
+        description = QLabel(
+            "Point Cloud Evaluation\nWerkzeug zum Laden, Ausrichten, Vergleichen und Exportieren von 3D-Punktwolken."
+            if self.language == "de" else
+            "Point Cloud Evaluation\nA tool to load, align, compare, and export 3D point clouds."
+        )
+        description.setWordWrap(True)
+        version = packaged_application_version()
+        version_text = f"Version: {version}" if version else (
+            "Version: Entwicklerversion (Quellcode)" if self.language == "de" else
+            "Version: development build (source)"
+        )
+        version_label = QLabel(version_text)
+        self._about_update_status_label = QLabel()
+        self._about_update_status_label.setWordWrap(True)
+        self._about_release_button = QPushButton(
+            "Release herunterladen" if self.language == "de" else "Download release"
+        )
+        self._about_release_button.clicked.connect(self._open_latest_release)
+        self._about_release_button.setVisible(self._latest_release is not None)
+        self._refresh_about_update_status()
+
+        link_row = QHBoxLayout()
+        repository_button = QPushButton("GitHub-Repository" if self.language == "de" else "GitHub repository")
+        repository_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(
+            "https://github.com/Heenne/spp2433_journal_evaluation"
+        )))
+        documentation_button = QPushButton("Dokumentation" if self.language == "de" else "Documentation")
+        documentation_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(
+            "https://github.com/Heenne/spp2433_journal_evaluation/blob/main/docs/user-guide.md"
+        )))
+        link_row.addWidget(repository_button)
+        link_row.addWidget(documentation_button)
+
+        check_button = QPushButton("Jetzt nach Updates suchen" if self.language == "de" else "Check for updates")
+        check_button.clicked.connect(lambda: self.check_for_updates(force=True))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addWidget(version_label)
+        layout.addWidget(self._about_update_status_label)
+        layout.addWidget(self._about_release_button)
+        layout.addLayout(link_row)
+        layout.addWidget(check_button)
+        layout.addWidget(buttons)
+
+        self._about_dialog = dialog
+        dialog.exec()
+        self._about_dialog = None
+        self._about_update_status_label = None
+        self._about_release_button = None
+
+    def _open_latest_release(self):
+        if self._latest_release is None:
+            return
+        release_url = self._latest_release.get("url")
+        if isinstance(release_url, str):
+            QDesktopServices.openUrl(QUrl(release_url))
 
     def guide_target(self, target_key: str):
         """Return the visible widget to spotlight for a guide step."""
@@ -788,20 +962,47 @@ class MainWindow(QMainWindow):
             with open(filepath, 'r') as f:
                 data = json.load(f)
             
+            project_dir = os.path.dirname(os.path.abspath(filepath))
+
+            def resolve_project_path(path):
+                if not path or not isinstance(path, str):
+                    return path
+                if not os.path.isabs(path):
+                    path = os.path.join(project_dir, path)
+                return os.path.normpath(path)
+
             entries = data.get("datasets", [])
             # Older project files stored a plain list of paths. New project
             # files also preserve visibility alongside every path.
             normalized_entries = []
             for entry in entries:
                 if isinstance(entry, str):
-                    normalized_entries.append({"filepath": entry, "visible": True})
+                    normalized_entries.append({"filepath": resolve_project_path(entry), "visible": True})
                 elif isinstance(entry, dict) and entry.get("filepath"):
+                    resolved_filepath = resolve_project_path(entry["filepath"])
+                    report = deepcopy(entry.get("last_comparison"))
+                    if isinstance(report, dict):
+                        report["reference_filepath"] = resolve_project_path(report.get("reference_filepath"))
+                        calculation_settings = report.get("calculation_settings")
+                        if isinstance(calculation_settings, dict):
+                            calculation_settings["reference_filepath"] = resolve_project_path(
+                                calculation_settings.get("reference_filepath")
+                            )
+                        for signature_key in ("source_input", "reference_input"):
+                            signature = report.get(signature_key)
+                            if isinstance(signature, dict):
+                                signature["filepath"] = resolve_project_path(signature.get("filepath"))
+                    surface_error_settings = deepcopy(entry.get("surface_error_settings"))
+                    if isinstance(surface_error_settings, dict):
+                        surface_error_settings["reference_filepath"] = resolve_project_path(
+                            surface_error_settings.get("reference_filepath")
+                        )
                     normalized_entries.append({
-                        "filepath": entry["filepath"],
+                        "filepath": resolved_filepath,
                         "visible": bool(entry.get("visible", True)),
                         "settings": entry.get("settings") if isinstance(entry.get("settings"), dict) else None,
-                        "last_comparison": entry.get("last_comparison"),
-                        "surface_error_settings": entry.get("surface_error_settings"),
+                        "last_comparison": report,
+                        "surface_error_settings": surface_error_settings,
                     })
 
             # Clear existing datasets.
@@ -813,7 +1014,7 @@ class MainWindow(QMainWindow):
             # would otherwise replace the restored camera orientation.
             self._pending_project_camera_view = data.get("camera_view")
             self._pending_project_comparisons = normalized_entries
-            self._pending_surface_error_source = data.get("surface_error_source_filepath")
+            self._pending_surface_error_source = resolve_project_path(data.get("surface_error_source_filepath"))
             self._restore_project_camera_after_final_load = False
             self.control_panel.load_export_profiles(data.get("export_profiles"))
             self.control_panel.load_preview_plot_settings(data.get("preview_plot_settings"))
@@ -850,11 +1051,11 @@ class MainWindow(QMainWindow):
         if filepath:
             self.open_specific_project(filepath)
 
-    def _project_data(self):
-        """Serialize project-owned state, including layer order and visibility."""
+    def _project_data(self, project_filepath=None, relative_paths: bool = True):
+        """Serialize project state, using paths relative to the project when possible."""
         panel = getattr(self, "control_panel", None)
         source_idx = panel.comparison_source_combo.currentIndex() if panel is not None else -1
-        return {
+        project_data = {
             "format_version": 4,
             "export_profiles": panel.export_profiles_data() if panel is not None else {},
             "preview_plot_settings": panel.get_preview_plot_settings() if panel is not None else {},
@@ -870,14 +1071,46 @@ class MainWindow(QMainWindow):
                     "filepath": dataset["filepath"],
                     "visible": bool(dataset.get("visible", True)),
                     "settings": deepcopy(dataset.get("settings", {})),
-                    **({"last_comparison": dataset["last_comparison"]}
+                    **({"last_comparison": deepcopy(dataset["last_comparison"])}
                        if isinstance(dataset.get("last_comparison"), dict) else {}),
-                    **({"surface_error_settings": dataset["surface_error_settings"]}
+                    **({"surface_error_settings": deepcopy(dataset["surface_error_settings"])}
                        if isinstance(dataset.get("surface_error_settings"), dict) else {}),
                 }
                 for dataset in self.datasets
             ],
         }
+        project_filepath = project_filepath or getattr(self, "project_filepath", None)
+        if not relative_paths or not project_filepath:
+            return project_data
+
+        project_dir = os.path.dirname(os.path.abspath(project_filepath))
+
+        def relative_path(path):
+            if isinstance(path, str) and path and os.path.isabs(path):
+                return os.path.relpath(path, project_dir).replace(os.sep, "/")
+            return path
+
+        project_data["surface_error_source_filepath"] = relative_path(
+            project_data.get("surface_error_source_filepath")
+        )
+        for entry in project_data["datasets"]:
+            entry["filepath"] = relative_path(entry.get("filepath"))
+            options = entry.get("surface_error_settings")
+            if isinstance(options, dict):
+                options["reference_filepath"] = relative_path(options.get("reference_filepath"))
+            report = entry.get("last_comparison")
+            if isinstance(report, dict):
+                report["reference_filepath"] = relative_path(report.get("reference_filepath"))
+                calculation_settings = report.get("calculation_settings")
+                if isinstance(calculation_settings, dict):
+                    calculation_settings["reference_filepath"] = relative_path(
+                        calculation_settings.get("reference_filepath")
+                    )
+                for signature_key in ("source_input", "reference_input"):
+                    signature = report.get(signature_key)
+                    if isinstance(signature, dict):
+                        signature["filepath"] = relative_path(signature.get("filepath"))
+        return project_data
 
     @staticmethod
     def _comparison_input_signature(dataset):
@@ -891,10 +1124,35 @@ class MainWindow(QMainWindow):
             "settings": json.dumps(dataset["settings"], sort_keys=True),
         }
 
+    @staticmethod
+    def _comparison_signature_matches(saved_signature, dataset, hash_cache=None):
+        current = MainWindow._comparison_input_signature(dataset)
+        if not isinstance(saved_signature, dict):
+            return False
+        if not saved_signature.get("sha256"):
+            return saved_signature == current
+
+        if any(saved_signature.get(key) != current.get(key) for key in ("filepath", "size", "settings")):
+            return False
+        path = current["filepath"]
+        if hash_cache is None:
+            hash_cache = {}
+        digest = hash_cache.get(path)
+        if digest is None:
+            import hashlib
+            hasher = hashlib.sha256()
+            with open(path, "rb") as point_cloud_file:
+                for block in iter(lambda: point_cloud_file.read(1024 * 1024), b""):
+                    hasher.update(block)
+            digest = hasher.hexdigest()
+            hash_cache[path] = digest
+        return saved_signature["sha256"] == digest
+
     def _restore_saved_comparisons(self):
         entries = getattr(self, "_pending_project_comparisons", [])
         self._pending_project_comparisons = []
         by_path = {os.path.abspath(dataset["filepath"]): dataset for dataset in self.datasets}
+        hash_cache = {}
         for entry in entries:
             source = by_path.get(os.path.abspath(entry["filepath"]))
             if source is None:
@@ -918,8 +1176,8 @@ class MainWindow(QMainWindow):
             if source is None or reference is None:
                 continue
             try:
-                if (report.get("source_input") != self._comparison_input_signature(source)
-                        or report.get("reference_input") != self._comparison_input_signature(reference)):
+                if (not self._comparison_signature_matches(report.get("source_input"), source, hash_cache)
+                        or not self._comparison_signature_matches(report.get("reference_input"), reference, hash_cache)):
                     continue
             except OSError:
                 continue
@@ -957,7 +1215,7 @@ class MainWindow(QMainWindow):
         try:
             import json
             with open(filepath, 'w') as f:
-                json.dump(self._project_data(), f, indent=4)
+                json.dump(self._project_data(relative_paths=False), f, indent=4)
             self.project_filepath = filepath
             self.set_project_dirty(False)
             self.statusBar().showMessage(f"Project saved to {filepath}")
@@ -983,6 +1241,148 @@ class MainWindow(QMainWindow):
             filepath += ".json"
         return self._save_project_to_file(filepath)
 
+    def pack_project_for_sharing(self):
+        """Create a portable ZIP containing this project and its point-cloud files."""
+        translated = lambda en, de: de if self.language == "de" else en
+        if not self.datasets:
+            QMessageBox.information(self, "Pack & Go", translated(
+                "Add point clouds before creating a project package.",
+                "Laden Sie zuerst Punktwolken, bevor Sie ein Projektpaket erstellen."))
+            return
+
+        edits = []
+        dialog = QDialog(self)
+        dialog.setWindowTitle(translated("Rename point-cloud files", "Punktwolkendateien umbenennen"))
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(translated(
+            "Choose a file name for each copied point cloud. File extensions are kept.",
+            "Legen Sie für jede kopierte Punktwolke einen Dateinamen fest. Die Dateiendungen bleiben erhalten.")))
+        form = QFormLayout()
+        for dataset in self.datasets:
+            stem, extension = os.path.splitext(os.path.basename(dataset["filepath"]))
+            row = QWidget(dialog)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            edit = QLineEdit(stem, row)
+            row_layout.addWidget(edit)
+            row_layout.addWidget(QLabel(extension, row))
+            form.addRow(translated("Current file:", "Aktuelle Datei:") + " " + os.path.basename(dataset["filepath"]), row)
+            edits.append((dataset, edit, extension))
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        forbidden = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+        reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+        filenames = []
+        for _dataset, edit, extension in edits:
+            stem = edit.text().strip()
+            if not stem or forbidden.search(stem) or stem.endswith((".", " ")) or stem.upper() in reserved:
+                QMessageBox.warning(self, translated("Invalid file name", "Ungültiger Dateiname"),
+                    translated("Enter a valid Windows file name.", "Geben Sie einen gültigen Windows-Dateinamen ein."))
+                return
+            filenames.append(stem + extension)
+        if len(set(name.casefold() for name in filenames)) != len(filenames):
+            QMessageBox.warning(self, translated("Duplicate file names", "Doppelte Dateinamen"),
+                translated("Each point cloud needs a different file name.", "Jede Punktwolke braucht einen eigenen Dateinamen."))
+            return
+        missing = [d["filepath"] for d, _e, _x in edits if not os.path.isfile(d["filepath"])]
+        if missing:
+            QMessageBox.warning(self, translated("Missing point-cloud file", "Punktwolkendatei fehlt"),
+                "\n".join(missing))
+            return
+
+        stem = os.path.splitext(os.path.basename(self.project_filepath or "Punktwolkenprojekt.json"))[0]
+        filepath, _ = QFileDialog.getSaveFileName(self,
+            translated("Save portable project package", "Portables Projektpaket speichern"),
+            os.path.join(os.path.dirname(self.project_filepath or ""), stem + ".zip"),
+            translated("ZIP archive (*.zip)", "ZIP-Archiv (*.zip)"))
+        if not filepath:
+            return
+        if not filepath.lower().endswith(".zip"):
+            filepath += ".zip"
+        if os.path.exists(filepath) and QMessageBox.question(self,
+            translated("Replace package?", "Paket ersetzen?"), filepath,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+
+        temp_path = None
+        try:
+            import hashlib
+            import json
+            project = self._project_data(relative_paths=False)
+            mapping, hashes = {}, {}
+            root = os.path.splitext(os.path.basename(filepath))[0]
+            with tempfile.NamedTemporaryFile(prefix=".pack_go_", suffix=".zip",
+                    dir=os.path.dirname(os.path.abspath(filepath)), delete=False) as temp:
+                temp_path = temp.name
+            with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+                for i, (dataset, _edit, _ext) in enumerate(edits):
+                    source = os.path.abspath(dataset["filepath"])
+                    relative = f"Punktwolken/{filenames[i]}"
+                    digest = hashlib.sha256()
+                    with open(source, "rb") as inp, archive.open(f"{root}/{relative}", "w") as out:
+                        for block in iter(lambda: inp.read(1024 * 1024), b""):
+                            digest.update(block)
+                            out.write(block)
+                    key = os.path.normcase(source)
+                    mapping.setdefault(key, relative)
+                    hashes[key] = digest.hexdigest()
+                    project["datasets"][i]["filepath"] = relative
+
+                def pack_path(path):
+                    if not isinstance(path, str) or not path:
+                        return path
+                    if not os.path.isabs(path):
+                        return path.replace("\\", "/")
+                    result = mapping.get(os.path.normcase(os.path.abspath(path)))
+                    if result is None:
+                        raise ValueError(f"Referenced file is not included: {path}")
+                    return result
+
+                project["surface_error_source_filepath"] = pack_path(project.get("surface_error_source_filepath"))
+                for i, entry in enumerate(project["datasets"]):
+                    entry["filepath"] = pack_path(entry.get("filepath"))
+                    options = entry.get("surface_error_settings")
+                    if isinstance(options, dict):
+                        options["reference_filepath"] = pack_path(options.get("reference_filepath"))
+                    report = entry.get("last_comparison")
+                    if not isinstance(report, dict):
+                        continue
+                    reference = report.get("reference_filepath")
+                    report["reference_filepath"] = pack_path(reference)
+                    calc = report.get("calculation_settings")
+                    if isinstance(calc, dict):
+                        calc["reference_filepath"] = pack_path(calc.get("reference_filepath"))
+                    for key in ("source_input", "reference_input"):
+                        signature = report.get(key)
+                        if not isinstance(signature, dict):
+                            continue
+                        original = signature.get("filepath")
+                        signature["filepath"] = pack_path(original)
+                        digest_path = self.datasets[i]["filepath"] if key == "source_input" else reference
+                        if isinstance(digest_path, str) and os.path.isabs(digest_path):
+                            signature["sha256"] = hashes.get(os.path.normcase(os.path.abspath(digest_path)))
+                archive.writestr(f"{root}/Projekt.json", json.dumps(project, indent=4, ensure_ascii=False))
+            os.replace(temp_path, filepath)
+            temp_path = None
+        except (OSError, ValueError, TypeError) as error:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+            QMessageBox.critical(self, translated("Pack & Go failed", "Pack & Go fehlgeschlagen"), str(error))
+            return
+
+        self.statusBar().showMessage(f"Portable project package created: {filepath}")
+        QMessageBox.information(self, translated("Project package created", "Projektpaket erstellt"), translated(
+            f"Created a ZIP with {len(self.datasets)} point clouds and project settings:\n{filepath}\n\n"
+            "Extract the complete ZIP, then open Projekt.json.",
+            f"ZIP mit {len(self.datasets)} Punktwolken und Projekteinstellungen erstellt:\n{filepath}\n\n"
+            "Entpacken Sie das ZIP vollständig und öffnen Sie danach Projekt.json."))
     # Kept for callers from earlier versions of the UI.
     def save_project_dialog(self):
         return self.save_project_as_dialog()
@@ -1205,6 +1605,17 @@ class MainWindow(QMainWindow):
         if 0 <= reference_idx < len(self.datasets):
             options["reference_filepath"] = self.datasets[reference_idx]["filepath"]
         panel.set_comparison_report(dataset.get("last_comparison"), options)
+        has_saved_reports = any(isinstance(item.get("last_comparison"), dict) for item in self.datasets)
+        panel.btn_comparison_report.setEnabled(has_saved_reports)
+        if isinstance(dataset.get("last_comparison"), dict):
+            panel.set_comparison_status(panel.comparison_status.text(), "ready")
+        elif has_saved_reports:
+            if self.language == "de":
+                panel.set_comparison_status("Gespeicherte Ergebnisse sind für andere Quellen vorhanden.", "warning")
+            else:
+                panel.set_comparison_status("Saved results are available for other sources.", "warning")
+        else:
+            panel.set_comparison_status(panel.comparison_status.text(), "empty")
 
     def show_surface_error_report(self, source_filepath=None):
         if not any(isinstance(dataset.get("last_comparison"), dict) for dataset in self.datasets):
@@ -1610,10 +2021,6 @@ class MainWindow(QMainWindow):
             preset_name = self._save_alignment_transform(
                 source_idx, target, alignment["transformation"], "Previous Global Align", details
             )
-            self.control_panel.set_comparison_summary(
-                f"Previous global alignment to {target['name']}: {alignment['source_overlap']:.1%} source overlap, "
-                f"trimmed RMSE {alignment['inlier_rmse']:.6g}."
-            )
             self.set_loading_state(False)
             self.update_plot()
             QMessageBox.information(
@@ -1680,10 +2087,6 @@ class MainWindow(QMainWindow):
                 f"trimmed RMSE {alignment['inlier_rmse']:.6g}"
             )
             if not optimizer["accepted"]:
-                self.control_panel.set_comparison_summary(
-                    "Manual pose retained: the bounded local optimizer did not provide a safe measurable improvement. "
-                    f"{baseline_summary}."
-                )
                 self.set_loading_state(False)
                 QMessageBox.information(
                     self,
@@ -1714,10 +2117,6 @@ class MainWindow(QMainWindow):
             preset_name = self._save_alignment_transform(
                 source_idx, target, alignment["transformation"], "Fine Align", details
             )
-            summary = (
-                f"Fine alignment to {target['name']}: {final_summary} (from {baseline_summary})."
-            )
-            self.control_panel.set_comparison_summary(summary)
             self.set_loading_state(False)
             self.update_plot()
             QMessageBox.information(

@@ -56,6 +56,12 @@ class ErrorReportDialog(QDialog):
                 self.table.setItem(row, column, item)
             if dataset["filepath"] == selected_source_path:
                 selected_row = row
+        if datasets and not isinstance(datasets[selected_row].get("last_comparison"), dict):
+            selected_row = next(
+                (row for row, dataset in enumerate(datasets)
+                 if isinstance(dataset.get("last_comparison"), dict)),
+                selected_row,
+            )
         layout.addWidget(self.table, 1)
         self.details = QTextEdit()
         self.details.setReadOnly(True)

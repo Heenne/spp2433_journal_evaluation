@@ -8,12 +8,11 @@ def get_config_filename(original_filepath: str) -> str:
     base_name = os.path.basename(original_filepath)
     name, _ = os.path.splitext(base_name)
     filtered_dir = os.path.join(dir_name, "filtered")
-    if not os.path.exists(filtered_dir):
-        os.makedirs(filtered_dir)
     return os.path.join(filtered_dir, f"{name}_config.json")
 
 def save_filter_config(original_filepath: str, config: dict):
     config_file = get_config_filename(original_filepath)
+    os.makedirs(os.path.dirname(config_file), exist_ok=True)
     with open(config_file, 'w') as f:
         json.dump(config, f)
 
@@ -137,16 +136,16 @@ def filter_by_sor(df: pd.DataFrame, num_neighbors: int = 50, std_ratio: float = 
     return df[mask].copy()
 
 def get_filtered_filename(original_filepath: str, filter_type: str, filter_val: str) -> str:
-    """Generates the filepath for the filtered dataset."""
+    """Generates the filepath for a filtered CSV dataset."""
     dir_name = os.path.dirname(original_filepath)
     base_name = os.path.basename(original_filepath)
-    name, ext = os.path.splitext(base_name)
+    name, _ = os.path.splitext(base_name)
     
     filtered_dir = os.path.join(dir_name, "filtered")
     if not os.path.exists(filtered_dir):
         os.makedirs(filtered_dir)
         
-    return os.path.join(filtered_dir, f"{name}_{filter_type}_{filter_val}{ext}")
+    return os.path.join(filtered_dir, f"{name}_{filter_type}_{filter_val}.csv")
 
 def save_filtered_data(df: pd.DataFrame, original_filepath: str, filter_type: str, filter_val: str) -> str:
     """Saves the filtered DataFrame and returns the new filepath."""

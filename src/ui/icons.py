@@ -7,6 +7,7 @@ from PyQt6.QtSvg import QSvgRenderer
 
 _PATHS = {
     "folder": '<path d="M3 6.5h6l2 2H21v9.8a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.3z"/><path d="M3 9h18"/>',
+    "package": '<path d="m3 7 9-4 9 4v10l-9 4-9-4z"/><path d="m3 7 9 4 9-4M12 11v10M7.5 5l9 4"/>',
     "cloud": '<circle cx="6" cy="8" r="1.3"/><circle cx="12" cy="6" r="1.3"/><circle cx="18" cy="9" r="1.3"/><circle cx="8" cy="14" r="1.3"/><circle cx="14" cy="13" r="1.3"/><circle cx="19" cy="16" r="1.3"/><circle cx="5" cy="18" r="1.3"/><circle cx="11" cy="19" r="1.3"/><circle cx="16" cy="21" r="1.3"/>',
     "save": '<path d="M4 3h13l4 4v14H4z"/><path d="M8 3v6h9V3M8 21v-8h9v8"/>',
     "save_as": '<path d="M4 3h12l4 4v6M4 3v18h9"/><path d="M8 3v6h8V4M8 21v-6h5"/><path d="m14 19 5-5 2 2-5 5-3 1z"/>',
@@ -37,6 +38,7 @@ _PATHS = {
     "export_display": '<rect x="3.5" y="4" width="17" height="15" rx="1.5"/><path d="m5 16 4.5-4.5 3.2 3.2 2.3-2.3L19 16"/>',
     "export_full": '<path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/><path d="M4 4l6 6m10-6-6 6M4 20l6-6m10 6-6-6"/>',
     "help": '<circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.5 2.5 0 1 1 4.3 1.8c-1.1 1.1-1.9 1.4-1.9 3M12 17.5h.01"/>',
+    "info": '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
 }
 
 _GITHUB_MARK = (

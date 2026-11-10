@@ -2,7 +2,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QSlider, QComboBox, 
     QCheckBox, QPushButton, QGroupBox, QHBoxLayout, QFileDialog, QListWidget, QListWidgetItem,
     QDoubleSpinBox, QSpinBox, QFormLayout, QInputDialog, QMessageBox, QScrollArea, QGridLayout,
-    QLineEdit, QTextEdit, QToolButton, QStackedWidget, QTabWidget, QSizePolicy, QButtonGroup
+    QLineEdit, QTextEdit, QToolButton, QStackedWidget, QTabWidget, QSizePolicy, QButtonGroup,
+    QDialog, QDialogButtonBox, QRadioButton
 )
 from PyQt6.QtCore import Qt, QSize, QEvent, QTimer, pyqtSignal
 from src.ui.icons import monochrome_icon
@@ -408,7 +409,7 @@ class ControlPanel(QWidget):
 
         self.btn_use_preview_settings = QPushButton("Use preview settings")
         self.btn_use_preview_settings.setToolTip(
-            "Copy the live preview's appearance settings into the active export profile."
+            "Choose whether to replace the active export profile or create a new one from the preview."
         )
         self.btn_use_preview_settings.clicked.connect(self._copy_preview_settings_to_export)
         
@@ -508,6 +509,14 @@ class ControlPanel(QWidget):
         bbox_layout.addRow("Min:", self.bbox_zmin)
         bbox_layout.addRow("Max:", self.bbox_zmax)
         outlier_layout.addLayout(bbox_layout)
+
+        # Avoid running expensive filters for intermediate text edits. Qt emits
+        # valueChanged only after Enter or focus leaves the field when disabled.
+        for field in (
+            self.voxel_spin, self.zscore_spin, self.sor_k_spin,
+            self.sor_std_spin, self.bbox_zmin, self.bbox_zmax,
+        ):
+            field.setKeyboardTracking(False)
         
         outlier_group.setLayout(outlier_layout)
         filter_layout.addWidget(outlier_group)
@@ -854,13 +863,18 @@ class ControlPanel(QWidget):
             self.comparison_axial_range_spin.valueChanged,
         ):
             signal.connect(lambda *_: self.surface_error_settings_changed.emit())
-        self.comparison_summary = QLabel("No comparison calculated yet.")
+        # Retain the summary value for internal callers; the visible report
+        # details now live in the results dialog instead of the settings form.
+        self.comparison_summary = QLabel()
         self.comparison_summary.setWordWrap(True)
-        self.comparison_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.comparison_summary.hide()
         self.comparison_status = QLabel("No results — calculate surface error")
+        self.comparison_status.setObjectName("comparisonStatus")
         self.comparison_status.setWordWrap(True)
         self.comparison_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.comparison_status.setProperty("state", "empty")
         self.btn_comparison_report = QPushButton("View results…")
+        self.btn_comparison_report.setObjectName("comparisonReportButton")
         self.btn_comparison_report.setEnabled(False)
         self.btn_comparison_report.clicked.connect(self.comparison_report_requested.emit)
         comparison_layout.addRow("Source:", self.comparison_source_combo)
@@ -880,8 +894,7 @@ class ControlPanel(QWidget):
         comparison_layout.addRow("", self.comparison_show_map_check)
         comparison_layout.addRow("", self.comparison_highlight_mean_check)
         comparison_layout.addRow("Result status:", self.comparison_status)
-        comparison_layout.addRow("Last result:", self.comparison_summary)
-        comparison_layout.addRow("", self.btn_comparison_report)
+        comparison_layout.addRow("Last result:", self.btn_comparison_report)
         comparison_group.setLayout(comparison_layout)
         fine_alignment_layout.addWidget(comparison_group)
         def update_error_controls(*_):
@@ -1085,13 +1098,13 @@ class ControlPanel(QWidget):
         self.btn_preview_export = QPushButton("Preview")
         self.btn_preview_export.setToolTip("Shows a fast preview using the current display resolution.")
         self.btn_preview_export.clicked.connect(self.export_preview_requested.emit)
-        self.btn_export_configured = QPushButton("Export display")
-        self.btn_export_configured.clicked.connect(lambda: self._on_configured_export_clicked(False))
-        self.btn_export_configured_full = QPushButton("Full resolution")
-        self.btn_export_configured_full.clicked.connect(lambda: self._on_configured_export_clicked(True))
+        self.btn_export_configured = QPushButton("Export full-resolution plot")
+        self.btn_export_configured.setToolTip(
+            "Exports the current plot settings at full point resolution without display voxel downsampling."
+        )
+        self.btn_export_configured.clicked.connect(lambda: self._on_configured_export_clicked(True))
         export_actions_layout.addWidget(self.btn_preview_export)
         export_actions_layout.addWidget(self.btn_export_configured)
-        export_actions_layout.addWidget(self.btn_export_configured_full)
         export_actions_group.setLayout(export_actions_layout)
         export_tab_layout.addWidget(export_actions_group)
         export_tab_layout.addStretch()
@@ -1363,8 +1376,7 @@ class ControlPanel(QWidget):
             (self.btn_apply_transform, "align"), (self.btn_run_icp, "align"),
             (self.btn_run_legacy_global_alignment, "align"), (self.btn_run_auto_alignment, "align"),
             (self.btn_calculate_error, "evaluate"), (self.btn_comparison_report, "evaluate"),
-            (self.btn_preview_export, "preview"), (self.btn_export_configured, "export_display"),
-            (self.btn_export_configured_full, "export_full"),
+            (self.btn_preview_export, "preview"), (self.btn_export_configured, "export_full"),
             (self.btn_new_export_profile, "plus"), (self.btn_rename_export_profile, "edit"),
             (self.btn_delete_export_profile, "trash"), (self.btn_import_export_profile, "folder"),
         ):
@@ -1743,15 +1755,89 @@ class ControlPanel(QWidget):
                 field.blockSignals(blocked)
 
     def _copy_preview_settings_to_export(self):
+        active_name = self.export_profile_combo.currentData()
+        if active_name not in self.export_profiles:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self._profile_text("Apply preview settings", "Vorschau-Einstellungen übernehmen"))
+        dialog_layout = QVBoxLayout(dialog)
+        overwrite_radio = QRadioButton(
+            self._profile_text(
+                f"Overwrite active profile ({active_name})",
+                f"Aktives Profil überschreiben ({active_name})",
+            ),
+            dialog,
+        )
+        new_profile_radio = QRadioButton(
+            self._profile_text("Create a new profile", "Neues Profil anlegen"), dialog,
+        )
+        new_profile_radio.setChecked(True)
+        dialog_layout.addWidget(overwrite_radio)
+        dialog_layout.addWidget(new_profile_radio)
+
+        base_name = f"{active_name} copy"
+        profile_name = base_name
+        suffix = 2
+        while profile_name in self.export_profiles:
+            profile_name = f"{base_name} {suffix}"
+            suffix += 1
+        profile_name_label = QLabel(self._profile_text("Profile name:", "Profilname:"), dialog)
+        profile_name_edit = QLineEdit(profile_name, dialog)
+        dialog_layout.addWidget(profile_name_label)
+        dialog_layout.addWidget(profile_name_edit)
+        profile_name_label.setVisible(True)
+        profile_name_edit.setVisible(True)
+        new_profile_radio.toggled.connect(profile_name_label.setVisible)
+        new_profile_radio.toggled.connect(profile_name_edit.setVisible)
+
+        error_label = QLabel(dialog)
+        error_label.setStyleSheet("color: #b42318;")
+        error_label.setWordWrap(True)
+        error_label.hide()
+        dialog_layout.addWidget(error_label)
+        dialog_buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+
+        def accept_dialog():
+            if not new_profile_radio.isChecked():
+                dialog.accept()
+                return
+            name = profile_name_edit.text().strip()
+            if not name:
+                error_label.setText(self._profile_text("Enter a profile name.", "Bitte einen Profilnamen eingeben."))
+                error_label.show()
+            elif name in self.export_profiles:
+                error_label.setText(self._profile_text(
+                    "A profile with this name already exists.",
+                    "Ein Profil mit diesem Namen existiert bereits.",
+                ))
+                error_label.show()
+            else:
+                dialog.accept()
+
+        dialog_buttons.accepted.connect(accept_dialog)
+        dialog_buttons.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(dialog_buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
         options = self.get_preview_plot_settings()
+        create_new_profile = new_profile_radio.isChecked()
+        target_name = profile_name_edit.text().strip() if create_new_profile else active_name
+
         self._loading_export_profile = True
         try:
             self.apply_export_options(options)
+            self.export_profiles[target_name] = deepcopy(self.get_export_options())
+            if create_new_profile:
+                self.export_profile_combo.addItem(target_name, target_name)
+                self.export_profile_combo.setCurrentIndex(self.export_profile_combo.count() - 1)
         finally:
             self._loading_export_profile = False
-        active_name = self.export_profile_combo.currentData()
-        if active_name in self.export_profiles:
-            self.export_profiles[active_name] = deepcopy(self.get_export_options())
+        self._update_export_profile_buttons()
         self.export_profiles_changed.emit()
 
     def get_export_options(self) -> dict:
@@ -1975,18 +2061,32 @@ class ControlPanel(QWidget):
                     ),
                 )
                 return
-            source_name, accepted = QInputDialog.getItem(
-                self, self._profile_text("Import export profile", "Exportprofil importieren"),
-                self._profile_text("Choose a profile:", "Profil auswählen:"), list(valid_profiles), 0, False
+            dialog = QDialog(self)
+            dialog.setWindowTitle(self._profile_text("Import export profile", "Exportprofil importieren"))
+            dialog_layout = QVBoxLayout(dialog)
+            dialog_form = QFormLayout()
+            source_profile_combo = QComboBox(dialog)
+            source_profile_combo.addItems(valid_profiles)
+            profile_name_edit = QLineEdit(source_profile_combo.currentText(), dialog)
+            source_profile_combo.currentTextChanged.connect(profile_name_edit.setText)
+            dialog_form.addRow(self._profile_text("Choose a profile:", "Profil auswählen:"), source_profile_combo)
+            dialog_form.addRow(
+                self._profile_text("Name in this project:", "Name in diesem Projekt:"), profile_name_edit,
             )
-            if not accepted:
+            dialog_layout.addLayout(dialog_form)
+            dialog_buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog,
+            )
+            dialog_buttons.accepted.connect(dialog.accept)
+            dialog_buttons.rejected.connect(dialog.reject)
+            dialog_layout.addWidget(dialog_buttons)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            profile_name, accepted = QInputDialog.getText(
-                self, self._profile_text("Add export profile", "Exportprofil hinzufügen"),
-                self._profile_text("Name in this project:", "Name in diesem Projekt:"), text=source_name,
-            )
+
+            source_name = source_profile_combo.currentText()
+            profile_name = profile_name_edit.text()
             profile_name = profile_name.strip()
-            if not accepted or not profile_name:
+            if not profile_name:
                 return
             if profile_name in self.export_profiles:
                 QMessageBox.information(
@@ -2141,15 +2241,20 @@ class ControlPanel(QWidget):
         self.comparison_summary.setTextFormat(Qt.TextFormat.PlainText)
         self.comparison_summary.setText(summary)
 
+    def set_comparison_status(self, status: str, state: str):
+        self.comparison_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.comparison_status.setText(status)
+        self.comparison_status.setProperty("state", state)
+        self.comparison_status.style().unpolish(self.comparison_status)
+        self.comparison_status.style().polish(self.comparison_status)
+
     def set_comparison_report(self, report, options=None):
         """Show availability and journal metrics separately from calculation controls."""
         from html import escape
         from src.utils.error_report import headline_rows, report_method, report_status
 
         status, available, state = report_status(report, options)
-        self.comparison_status.setText(status)
-        colour = {"ready": "#16803c", "warning": "#a06000", "empty": "#777777"}[state]
-        self.comparison_status.setStyleSheet(f"color: {colour}; font-weight: bold;")
+        self.set_comparison_status(status, state)
         self.btn_comparison_report.setEnabled(available)
         self.comparison_summary.setTextFormat(Qt.TextFormat.RichText)
         if not available:

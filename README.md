@@ -19,6 +19,15 @@
 
 New to the app? Follow the [step-by-step user guide](docs/user-guide.md). It covers loading data, alignment, comparison, saving, and exports.
 
+## Uninstall on Windows
+
+1. Close **SPP 2433 — Point Cloud Evaluation**.
+2. Delete every downloaded copy of `PointCloudEvaluation-*.exe` (for example, from Downloads or the Desktop).
+3. To remove the cached runtime, settings, and logs, enter `%LOCALAPPDATA%\SPP2433` in File Explorer and delete the `p`, `SPP2433PointCloudEvaluation`, and `logs` folders if they exist. The runtime cache is extracted here on first launch and reused by later launches.
+4. If an older version left an `app_settings.json` beside the EXE, delete that file too.
+
+Projects, point-cloud files, exports, and collected project folders are stored separately and are **not** removed by these steps. Delete those manually only if you no longer need them.
+
 ## Documentation
 
 - [User guide](docs/user-guide.md) — complete workflow from first launch to saved results.
@@ -29,6 +38,7 @@ New to the app? Follow the [step-by-step user guide](docs/user-guide.md). It cov
 ## At a glance
 
 - Load CSV and PLY point clouds and keep their order, visibility, transforms, analysis settings, reports, preview settings, and export profiles in a project file.
+- Use **Pack & Go** to create a portable ZIP with the project and all loaded point clouds for sharing with project partners.
 - Align manually, use bounded fine alignment, or try the broader PCA/FPFH global alignment.
 - Compare a selected measurement with a reference using unsigned distance or signed local-plane deviation.
 - Export transformed point-cloud data and publication-ready plot images.
